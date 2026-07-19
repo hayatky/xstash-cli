@@ -44,3 +44,21 @@ Deno.test('postsFromXquikPayload reads search result arrays', () => {
 
   assertEquals(posts.map((post) => post.id), ['1', '2']);
 });
+
+Deno.test('postsFromXquikPayload maps extraction aliases without losing raw fields', () => {
+  const rawTweet = {
+    tweet_id: '42',
+    tweet_text: 'aliased text',
+    tweet_created_at: '2026-06-30T04:54:28Z',
+    author_user_id: 'user-7',
+    media_url: 'https://example.com/image.jpg',
+  };
+
+  const [post] = postsFromXquikPayload({ results: [rawTweet] });
+
+  assertEquals(post?.id, '42');
+  assertEquals(post?.text, 'aliased text');
+  assertEquals(post?.created_at, '2026-06-30T04:54:28Z');
+  assertEquals(post?.author_id, 'user-7');
+  assertEquals(post?.raw_xquik_tweet, rawTweet);
+});

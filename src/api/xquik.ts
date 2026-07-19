@@ -77,9 +77,15 @@ export function xquikTweetToPost(raw: Record<string, unknown>): XPostEntity {
 
   return {
     id,
-    author_id: asString(firstValue(author['id'], raw['author_id'])),
-    text: asString(firstValue(raw['text'], raw['full_text'], raw['content'])),
-    created_at: asString(firstValue(raw['created_at'], raw['createdAt'])),
+    author_id: asString(
+      firstValue(author['id'], raw['author_id'], raw['author_user_id']),
+    ),
+    text: asString(
+      firstValue(raw['text'], raw['full_text'], raw['content'], raw['tweet_text']),
+    ),
+    created_at: asString(
+      firstValue(raw['created_at'], raw['createdAt'], raw['tweet_created_at']),
+    ),
     conversation_id: asString(firstValue(raw['conversation_id'], raw['conversationId'])),
     lang: asString(raw['lang']),
     possibly_sensitive: Boolean(raw['possibly_sensitive']),
@@ -92,6 +98,7 @@ export function xquikTweetToPost(raw: Record<string, unknown>): XPostEntity {
       quote_count: asNumber(firstValue(raw['quoteCount'], raw['quote_count'], raw['quotes'])) ?? 0,
     },
     raw_xquik_author: author,
+    raw_xquik_tweet: raw,
   };
 }
 
