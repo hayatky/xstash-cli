@@ -35,6 +35,26 @@ function readHeaderSeconds(response: Response, headerName: string): number | nul
   return null;
 }
 
+export function retryAfterWaitMs(response: Response, nowMs = Date.now()): number | null {
+  const value = response.headers.get('retry-after')?.trim();
+  if (!value) {
+    return null;
+  }
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return seconds * 1000;
+  }
+
+  const retryAt = Date.parse(value);
+  if (!Number.isFinite(retryAt)) {
+    return null;
+  }
+
+  const waitMs = retryAt - nowMs;
+  return waitMs > 0 ? waitMs : null;
+}
+
 function rateLimitWaitMs(response: Response): number | null {
   const resetEpoch = readHeaderSeconds(response, 'x-rate-limit-reset');
   if (resetEpoch) {
@@ -45,12 +65,7 @@ function rateLimitWaitMs(response: Response): number | null {
     }
   }
 
-  const retryAfter = readHeaderSeconds(response, 'retry-after');
-  if (retryAfter) {
-    return retryAfter * 1000;
-  }
-
-  return null;
+  return retryAfterWaitMs(response);
 }
 
 export async function runWithRetry<T>(
