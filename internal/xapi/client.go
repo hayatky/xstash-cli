@@ -26,6 +26,7 @@ type Client struct {
 	AfterRequest   func(context.Context, string, int, []byte, error) error
 	OnUnauthorized func(context.Context) (string, error)
 	LookupLimit    func(context.Context) (int, error)
+	authErr        error
 }
 type Page struct {
 	Data []json.RawMessage `json:"data"`
@@ -54,6 +55,9 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 func (c *Client) Get(ctx context.Context, path string, q url.Values) ([]byte, int, error) {
+	if c.authErr != nil {
+		return nil, 0, c.authErr
+	}
 	if c.HTTP == nil || c.Sleep == nil || c.MaxAttempts < 1 || c.BeforeRequest == nil {
 		return nil, 0, fmt.Errorf("invalid API client configuration")
 	}
@@ -108,6 +112,7 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) ([]byte, in
 		if resp.StatusCode == http.StatusUnauthorized && c.OnUnauthorized != nil && attempt+1 < c.MaxAttempts {
 			token, e := c.OnUnauthorized(ctx)
 			if e != nil {
+				c.authErr = e
 				return nil, resp.StatusCode, e
 			}
 			c.Token = token

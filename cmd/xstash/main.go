@@ -40,7 +40,7 @@ func flags(name string, errout io.Writer) *flag.FlagSet {
 }
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: xstash <config|sync|export|stats|pending|complete>")
+		return fmt.Errorf("usage: xstash <config|db|sync|export|stats|pending|complete>")
 	}
 	configPath, dbPath, err := config.Paths()
 	if err != nil {
@@ -60,7 +60,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	config.ApplyEnv(&c, os.Getenv)
+	if err = config.ApplyEnv(&c, os.Getenv); err != nil {
+		return err
+	}
 	cmd := args[0]
 	args = args[1:]
 	if cmd == "config" {
@@ -69,7 +71,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		switch args[0] {
 		case "show":
-			return jsonOut(stdout, map[string]any{"client_id": c.ClientID, "user_id": c.UserID, "access_token_set": c.AccessToken != "", "refresh_token_set": c.RefreshToken != "", "lookup_batch_size": c.LookupBatchSize, "owned_post_microusd": c.OwnedPostMicrousd, "post_microusd": c.PostMicrousd, "user_microusd": c.UserMicrousd, "media_microusd": c.MediaMicrousd, "owned_eligible": c.OwnedEligible})
+			return jsonOut(stdout, map[string]any{"client_id": c.ClientID, "user_id": c.UserID, "access_token_set": c.AccessToken != "", "refresh_token_set": c.RefreshToken != "", "expires_at": c.ExpiresAt, "token_type": c.TokenType, "scope": c.Scope, "scope_source": c.ScopeSource, "refresh_state": c.RefreshState, "refresh_started_at": c.RefreshStartedAt, "auth_metadata_valid": auth.Ready(c) == nil, "lookup_batch_size": c.LookupBatchSize, "owned_post_microusd": c.OwnedPostMicrousd, "post_microusd": c.PostMicrousd, "user_microusd": c.UserMicrousd, "media_microusd": c.MediaMicrousd, "owned_eligible": c.OwnedEligible})
 		case "init":
 			f := flags("config init", stderr)
 			id := f.String("client-id", c.ClientID, "OAuth client ID")
@@ -111,15 +113,44 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("unknown config subcommand")
 		}
 	}
-	if err = os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
-		return err
+	if cmd == "db" && len(args) == 1 && args[0] == "init" {
+		if err = os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+			return err
+		}
+		guard, e := lock.Acquire(dbPath + ".lock")
+		if e != nil {
+			return e
+		}
+		defer guard.Close()
+		s, e := store.Open(dbPath)
+		if e != nil {
+			return e
+		}
+		if e = s.Close(); e != nil {
+			return e
+		}
+		return jsonOut(stdout, map[string]any{"database_initialized": true})
 	}
-	s, err := store.Open(dbPath)
+	switch cmd {
+	case "db":
+		if len(args) != 1 || args[0] != "check" {
+			return fmt.Errorf("usage: db <init|check>")
+		}
+	case "sync", "export", "stats", "pending", "complete":
+	default:
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+	s, err := store.OpenExisting(dbPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open existing database (verify XSTASH_HOME; use db init only for a new database): %w", err)
 	}
 	defer s.Close()
 	switch cmd {
+	case "db":
+		if err := s.CheckIntegrity(); err != nil {
+			return err
+		}
+		return jsonOut(stdout, map[string]any{"database_exists": true, "schema_version": 1, "quick_check": "ok", "foreign_key_check": "ok"})
 	case "sync":
 		return syncCommand(ctx, args, stdout, stderr, s, &c, configPath, dbPath)
 	case "export":
@@ -215,6 +246,9 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if c.AccessToken == "" && c.RefreshToken == "" {
 		return fmt.Errorf("authenticate first with config init")
 	}
+	if err = auth.Ready(*c); err != nil {
+		return err
+	}
 	if c.MediaMicrousd <= 0 {
 		return fmt.Errorf("media read price is unknown; set --media-microusd after checking Developer Console")
 	}
@@ -250,8 +284,10 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	client := xapi.New(c.AccessToken)
 	acct := syncer.Accountant{Store: s, Config: *c, RunID: id}
 	acct.Attach(client)
+	var authFailure error
 	client.OnUnauthorized = func(ctx context.Context) (string, error) {
 		if e := auth.Refresh(ctx, c, configPath); e != nil {
+			authFailure = e
 			return "", e
 		}
 		return c.AccessToken, nil
@@ -303,11 +339,20 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 			break
 		}
 	}
+	if authFailure != nil {
+		return errors.Join(failures...)
+	}
 	if e = syncer.ResolveQuotes(ctx, s, client); e != nil {
 		failures = append(failures, e)
 	}
+	if authFailure != nil {
+		return errors.Join(failures...)
+	}
 	if e = syncer.ResolveMetadata(ctx, s, client); e != nil {
 		failures = append(failures, e)
+	}
+	if authFailure != nil {
+		return errors.Join(failures...)
 	}
 	if *downloadMedia {
 		if _, e = media.Download(ctx, s, filepath.Join(filepath.Dir(dbPath), "media")); e != nil {

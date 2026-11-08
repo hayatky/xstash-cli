@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"github.com/hayatky/xstash-cli/internal/config"
+	"github.com/hayatky/xstash-cli/internal/xapi"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,12 +18,12 @@ type rt func(*http.Request) (*http.Response, error)
 func (f rt) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func TestRefreshPersistsRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	c := config.Config{ClientID: "client", AccessToken: "old", RefreshToken: "old-refresh"}
+	c := config.Config{ClientID: "client", AccessToken: "old", RefreshToken: "old-refresh", Scope: xapi.RequiredScope, TokenType: "Bearer"}
 	client := &http.Client{Transport: rt(func(r *http.Request) (*http.Response, error) {
 		if r.FormValue("refresh_token") != "old-refresh" {
 			t.Error("wrong token")
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"access_token":"new","refresh_token":"rotated","expires_in":3600}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"access_token":"new","refresh_token":"rotated","expires_in":3600,"token_type":"bearer"}`)), Header: make(http.Header)}, nil
 	})}
 	if e := refresh(context.Background(), &c, path, client, "https://example.invalid/token"); e != nil {
 		t.Fatal(e)

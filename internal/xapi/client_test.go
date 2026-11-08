@@ -3,6 +3,7 @@ package xapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -75,5 +76,24 @@ func TestNoUnaccountedRedirect(t *testing.T) {
 	})}
 	if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{}); err == nil || calls != 1 {
 		t.Fatalf("redirect followed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestRefreshFailureStopsLaterRequests(t *testing.T) {
+	calls, refreshes, accounted := 0, 0, 0
+	c := New("synthetic")
+	c.HTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) { calls++; return response(401, "{}"), nil })}
+	c.BeforeRequest = func(context.Context, string, url.Values) error { accounted++; return nil }
+	c.OnUnauthorized = func(context.Context) (string, error) {
+		refreshes++
+		return "", fmt.Errorf("synthetic refresh persistence failure")
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{}); err == nil {
+			t.Fatal("failed refresh accepted")
+		}
+	}
+	if calls != 1 || refreshes != 1 || accounted != 1 {
+		t.Fatalf("work continued after refresh failure: requests=%d refreshes=%d reservations=%d", calls, refreshes, accounted)
 	}
 }
