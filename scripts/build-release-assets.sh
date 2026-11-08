@@ -114,7 +114,7 @@ for entry in "${TARGETS[@]}"; do
     exit 1
   fi
 done
-for doc in README.md README.ja.md LICENSE CHANGELOG.md docs/migration-v2.md docs/releases/v2.0.0.md; do
+for doc in README.md README.ja.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md docs/migration-v2.md docs/releases/v2.0.0.md; do
   if [[ ! -f "$ROOT_DIR/$doc" ]]; then
     echo "error: required release document missing: $doc" >&2
     exit 1
@@ -151,7 +151,7 @@ for entry in "${TARGETS[@]}"; do
   package_dir="$TMP_DIR/$package_base"
   mkdir -p "$package_dir"
   cp "$src_binary" "$package_dir/${BIN_NAME}${ext}"
-  cp "$ROOT_DIR/README.md" "$ROOT_DIR/README.ja.md" "$ROOT_DIR/LICENSE" "$ROOT_DIR/CHANGELOG.md" "$package_dir/"
+  cp "$ROOT_DIR/README.md" "$ROOT_DIR/README.ja.md" "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$ROOT_DIR/CHANGELOG.md" "$package_dir/"
   mkdir -p "$package_dir/docs/releases"
   cp "$ROOT_DIR/docs/"*.md "$package_dir/docs/"
   cp "$ROOT_DIR/docs/releases/v2.0.0.md" "$package_dir/docs/releases/"

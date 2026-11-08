@@ -12,7 +12,7 @@ bash "$ROOT_DIR/scripts/build-release-assets.sh" --version v2.0.0 --bin-name che
 (cd "$TMP_DIR/packages" && sha256sum -c SHA256SUMS.txt)
 test "$(find "$TMP_DIR/packages" -maxdepth 1 -type f | wc -l)" -eq 5
 tar -tzf "$TMP_DIR/packages/check-v2.0.0-linux-x64.tar.gz" > "$TMP_DIR/contents"
-for expected in check README.md README.ja.md LICENSE CHANGELOG.md docs/migration-v2.md skills/xstash-bookmark-intel/SKILL.md; do
+for expected in check README.md README.ja.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md docs/migration-v2.md skills/xstash-bookmark-intel/SKILL.md; do
   grep -Fx "check-v2.0.0-linux-x64/$expected" "$TMP_DIR/contents"
 done
 if bash "$ROOT_DIR/scripts/build-release-assets.sh" --version v2.0.0 --bin-name check --dist "$TMP_DIR/binaries" --out "$TMP_DIR/packages" --skip-build; then
