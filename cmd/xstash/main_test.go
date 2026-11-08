@@ -76,6 +76,13 @@ func TestCurrentMonthSeparatesEstimateAndUncertainty(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	if actual, ok := v["actual_usd"]; !ok || actual != nil {
+		t.Fatal("actual billing must be explicitly unknown")
+	}
+	details, ok := v["cost_details"].(store.CostDetails)
+	if !ok || details.ResourceDays != 1 || len(details.ResourcePrices) != 1 || details.ResourcePrices[0].EstimatedMicrousd != 5000 || len(details.Endpoints) != 1 || details.Endpoints[0].EstimatedMicrousd != 5000 {
+		t.Fatalf("cost details: %#v", v["cost_details"])
+	}
 	if v["estimated_usd"] != 0.005 || v["uncertain_max_usd"] != 0.04 || v["month_utc"] != "2026-11" {
 		t.Fatalf("month: %#v", v)
 	}

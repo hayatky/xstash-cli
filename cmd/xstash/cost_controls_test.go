@@ -137,3 +137,35 @@ func TestInvalidCostOptionsAndUnknownExpansionPriceStopBeforeNetwork(t *testing.
 		})
 	}
 }
+
+func TestInitialIdentityEnablesOnlyConfirmedOwnedLists(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := config.Default()
+	c.AccessToken, c.TokenType, c.Scope = "synthetic", "Bearer", xapi.RequiredScope
+	c.ExpiresAt = time.Now().Add(time.Hour)
+	c.OwnedEligible = true
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+	http.DefaultTransport = stopTransport(func(r *http.Request) (*http.Response, error) {
+		body := `{"data":[{"id":"1"}],"meta":{"result_count":1}}`
+		if r.URL.Path == "/2/users/me" {
+			body = `{"data":{"id":"123"}}`
+		} else if r.URL.Path != "/2/users/123/bookmarks" {
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	var out, errout bytes.Buffer
+	if err := syncCommand(context.Background(), []string{"--kind", "bookmark", "--quote-depth", "0"}, &out, &errout, s, &c, filepath.Join(dir, "config.json"), filepath.Join(dir, "db")); err != nil {
+		t.Fatal(err)
+	}
+	var estimate int64
+	if err := s.DB.QueryRow(`SELECT sum(estimated_microusd) FROM api_requests`).Scan(&estimate); err != nil || estimate != 11000 {
+		t.Fatalf("estimate=%d err=%v", estimate, err)
+	}
+}

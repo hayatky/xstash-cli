@@ -63,6 +63,7 @@ func TestIncrementalPageCostAndFailureBoundary(t *testing.T) {
 		conf := config.Default()
 		conf.MediaMicrousd = 5000
 		conf.OwnedEligible = true
+		conf.UserID = "123"
 		a := Accountant{Store: s, Config: conf, RunID: "r"}
 		a.Attach(c)
 		r, e := RunKind(ctx, s, c, "123", "bookmark", Options{PageSize: size, Threshold: 5})

@@ -15,6 +15,8 @@ import (
 	"github.com/hayatky/xstash-cli/internal/store"
 )
 
+const maxResponseBytes = 16 << 20
+
 type Client struct {
 	BaseURL     string
 	Token       string
@@ -96,8 +98,12 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values) ([]byte, in
 			}
 			continue
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 		resp.Body.Close()
+		if len(body) > maxResponseBytes {
+			body = body[:maxResponseBytes]
+			readErr = fmt.Errorf("response exceeds size limit")
+		}
 		if c.AfterRequest != nil {
 			if e := c.AfterRequest(ctx, path, resp.StatusCode, body, readErr); e != nil {
 				return nil, resp.StatusCode, e

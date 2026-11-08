@@ -97,3 +97,28 @@ func TestRefreshFailureStopsLaterRequests(t *testing.T) {
 		t.Fatalf("work continued after refresh failure: requests=%d refreshes=%d reservations=%d", calls, refreshes, accounted)
 	}
 }
+
+func TestOversizedResponseRetainsUncertainOutcome(t *testing.T) {
+	for _, status := range []int{200, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			c := New("synthetic")
+			c.BeforeRequest = func(context.Context, string, url.Values) error { return nil }
+			calls := 0
+			c.HTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return response(status, strings.Repeat(" ", maxResponseBytes+1)), nil
+			})}
+			accounted := false
+			c.AfterRequest = func(_ context.Context, _ string, gotStatus int, body []byte, readErr error) error {
+				accounted = true
+				if gotStatus != status || len(body) != maxResponseBytes || readErr == nil {
+					t.Fatalf("status=%d len=%d readErr=%v", gotStatus, len(body), readErr)
+				}
+				return nil
+			}
+			if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{"ids": {"1"}}); err == nil || !accounted || calls != 1 {
+				t.Fatalf("err=%v accounted=%v calls=%d", err, accounted, calls)
+			}
+		})
+	}
+}

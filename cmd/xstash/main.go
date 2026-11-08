@@ -316,6 +316,8 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 			return e
 		}
 	}
+	// The first identity lookup happens after the accountant is constructed.
+	acct.Config.UserID = c.UserID
 	if e = s.BindOwner(ctx, c.UserID); e != nil {
 		return e
 	}
@@ -443,7 +445,11 @@ func currentMonth(ctx context.Context, s *store.Store, now time.Time) (map[strin
 	if err := s.DB.QueryRowContext(ctx, `SELECT coalesce(sum(amount_microusd),0) FROM budget_reservations WHERE state='reserved' AND substr(created_at,1,7)=?`, month).Scan(&uncertain); err != nil {
 		return nil, err
 	}
-	return map[string]any{"month_utc": month, "requests": req, "resources": res, "estimated_microusd": cost, "estimated_usd": float64(cost) / 1000000, "uncertain_max_microusd": uncertain, "uncertain_max_usd": float64(uncertain) / 1000000, "basis": "local estimate; excludes other clients and actual invoices"}, nil
+	details, err := s.CostDetails(ctx, month)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"cost_details": details, "month_utc": month, "requests": req, "resources": res, "estimated_microusd": cost, "estimated_usd": float64(cost) / 1000000, "uncertain_max_microusd": uncertain, "uncertain_max_usd": float64(uncertain) / 1000000, "actual_usd": nil, "basis": "historical local estimate at recorded rates; not repriced by current settings; excludes other clients and actual invoices"}, nil
 }
 func metadataCounts(ctx context.Context, s *store.Store) (map[string]int, error) {
 	rows, e := s.DB.QueryContext(ctx, `SELECT reason,count(*) FROM metadata_queue GROUP BY reason`)

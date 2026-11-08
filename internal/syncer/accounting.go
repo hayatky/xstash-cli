@@ -46,12 +46,12 @@ func (a *Accountant) Before(ctx context.Context, path string, q url.Values) erro
 	var e error
 	price := a.Config.PostMicrousd
 	switch {
-	case strings.HasSuffix(path, "/users/me"):
+	case path == "/2/users/me":
 		count = 1
 		price = a.Config.UserMicrousd
-	case strings.HasSuffix(path, "/bookmarks") || strings.HasSuffix(path, "/liked_tweets"):
+	case listAccountID(path) != "":
 		count, e = strconv.ParseInt(q.Get("max_results"), 10, 64)
-		if a.Config.OwnedEligible {
+		if a.Config.OwnedEligible && a.Config.UserID != "" && listAccountID(path) == a.Config.UserID {
 			price = a.Config.OwnedPostMicrousd
 		}
 	case path == "/2/tweets":
@@ -74,7 +74,24 @@ func (a *Accountant) Before(ctx context.Context, path string, q url.Values) erro
 	a.reservation, e = a.Store.Reserve(ctx, a.RunID, a.at, total)
 	return e
 }
+
+// listAccountID accepts only the supported account-scoped endpoints. App
+// ownership alone does not establish eligibility for a different user's data.
+func listAccountID(path string) string {
+	parts := strings.Split(path, "/")
+	if len(parts) != 5 || parts[0] != "" || parts[1] != "2" || parts[2] != "users" || parts[3] == "" || strings.Trim(parts[3], "0123456789") != "" || (parts[4] != "bookmarks" && parts[4] != "liked_tweets") {
+		return ""
+	}
+	return parts[3]
+}
+
 func (a *Accountant) After(ctx context.Context, path string, status int, body []byte, requestErr error) error {
+	// X documents unsuccessful responses as unbilled. An observed, complete
+	// HTTP error is different from a timeout or an unreadable response. Settle
+	// before the day-boundary logic so a rejected request creates no carry.
+	if requestErr == nil && status >= 400 && status <= 599 {
+		return a.Store.RecordAttempt(ctx, a.reservation, a.RunID, path, a.at, status, nil, true)
+	}
 	end := a.now()
 	if end.Format("2006-01-02") != a.at.Format("2006-01-02") {
 		id, e := a.Store.CarryReservation(ctx, a.reservation, end)
@@ -88,8 +105,8 @@ func (a *Accountant) After(ctx context.Context, path string, status int, body []
 	var reads []store.Read
 	if certain {
 		var envelope struct {
-			Data   json.RawMessage `json:"data"`
-			Errors json.RawMessage `json:"errors"`
+			Data   json.RawMessage   `json:"data"`
+			Errors []json.RawMessage `json:"errors"`
 			Meta   struct {
 				ResultCount *int `json:"result_count"`
 			} `json:"meta"`
@@ -101,6 +118,17 @@ func (a *Accountant) After(ctx context.Context, path string, status int, body []
 		if json.Unmarshal(body, &envelope) != nil {
 			certain = false
 		} else {
+			// An arbitrary nonempty errors value is not evidence of an empty,
+			// successful lookup. Require recognizable API problem objects.
+			for _, raw := range envelope.Errors {
+				var problem struct {
+					Title string `json:"title"`
+					Type  string `json:"type"`
+				}
+				if json.Unmarshal(raw, &problem) != nil || (problem.Title == "" && problem.Type == "") {
+					certain = false
+				}
+			}
 			var data []json.RawMessage
 			if len(envelope.Data) > 0 && string(envelope.Data) != "null" {
 				if envelope.Data[0] == '[' {
@@ -111,7 +139,7 @@ func (a *Accountant) After(ctx context.Context, path string, status int, body []
 					data = []json.RawMessage{envelope.Data}
 				}
 			}
-			if strings.HasSuffix(path, "/bookmarks") || strings.HasSuffix(path, "/liked_tweets") {
+			if listAccountID(path) != "" {
 				if envelope.Meta.ResultCount == nil || *envelope.Meta.ResultCount != len(data) {
 					certain = false
 				}
@@ -127,7 +155,7 @@ func (a *Accountant) After(ctx context.Context, path string, status int, body []
 					break
 				}
 				kind := "post"
-				if strings.HasSuffix(path, "/users/me") {
+				if path == "/2/users/me" {
 					kind = "user"
 				}
 				reads = append(reads, store.Read{Type: kind, ID: v.ID, Price: a.postPrice})
