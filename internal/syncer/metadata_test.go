@@ -34,10 +34,10 @@ func TestMetadataFetchesOnlyNewPosts(t *testing.T) {
 		}
 		return mockResponse(200, `{"data":[{"id":"1","author_id":"10"}],"includes":{"users":[{"id":"10","username":"example"}]}}`), nil
 	})}
-	if e = ResolveMetadata(ctx, s, c); e != nil {
+	if e = ResolveMetadata(ctx, s, c, 0); e != nil {
 		t.Fatal(e)
 	}
-	if e = ResolveMetadata(ctx, s, c); e != nil || calls != 1 {
+	if e = ResolveMetadata(ctx, s, c, 0); e != nil || calls != 1 {
 		t.Fatalf("calls=%d err=%v", calls, e)
 	}
 	ids, e := s.PendingMetadata(ctx, 10)

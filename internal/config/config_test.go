@@ -4,49 +4,45 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
-func TestEnvTokenDoesNotReuseOtherCredentials(t *testing.T) {
-	c := Default()
-	c.ClientID = "app"
-	c.AccessToken = "old"
-	c.RefreshToken = "old-refresh"
-	c.UserID = "1"
-	c.OwnedEligible = true
-	c.ExpiresAt = time.Now().Add(-time.Hour)
-	ApplyEnv(&c, func(k string) string {
-		if k == "XSTASH_ACCESS_TOKEN" {
-			return "new"
-		}
-		return ""
-	})
-	if c.AccessToken != "new" || c.RefreshToken != "" || c.UserID != "" || !c.ExpiresAt.IsZero() || c.OwnedEligible {
-		t.Fatal("stale account credentials survived token override")
+func TestEnvTokensCannotReplaceDurableState(t *testing.T) {
+	for _, key := range []string{"XSTASH_ACCESS_TOKEN", "XSTASH_REFRESH_TOKEN"} {
+		t.Run(key, func(t *testing.T) {
+			c := Config{ClientID: "app", AccessToken: "rotated", RefreshToken: "rotated-refresh", UserID: "1", RefreshState: "pending", Scope: "saved"}
+			before := c
+			err := ApplyEnv(&c, func(k string) string {
+				if k == key {
+					return "stale-token"
+				}
+				return ""
+			})
+			if err == nil || c != before {
+				t.Fatal("environment override changed durable auth state")
+			}
+		})
 	}
 }
-func TestEnvClientChangeClearsOldAppSecret(t *testing.T) {
-	c := Config{ClientID: "old", ClientSecret: "secret", AccessToken: "token", RefreshToken: "refresh", UserID: "1", OwnedEligible: true}
-	ApplyEnv(&c, func(k string) string {
+func TestEnvClientChangeRejectsSavedAuthentication(t *testing.T) {
+	c := Config{ClientID: "old", ClientSecret: "secret", AccessToken: "token", RefreshState: "pending"}
+	before := c
+	err := ApplyEnv(&c, func(k string) string {
 		if k == "XSTASH_CLIENT_ID" {
 			return "new"
 		}
 		return ""
 	})
-	if c.ClientSecret != "" || c.AccessToken != "" || c.RefreshToken != "" || c.UserID != "" || c.OwnedEligible {
-		t.Fatal("credentials from old app survived")
+	if err == nil || c != before {
+		t.Fatal("app override changed durable auth state")
 	}
 }
-func TestRefreshOverrideDoesNotUseOldAccessToken(t *testing.T) {
-	c := Config{AccessToken: "old", RefreshToken: "old-refresh", UserID: "1"}
-	ApplyEnv(&c, func(k string) string {
-		if k == "XSTASH_REFRESH_TOKEN" {
-			return "new-refresh"
-		}
-		return ""
+func TestEnvClientSettingsWithoutSavedAuthentication(t *testing.T) {
+	c := Default()
+	err := ApplyEnv(&c, func(k string) string {
+		return map[string]string{"XSTASH_CLIENT_ID": "app", "XSTASH_CLIENT_SECRET": "secret"}[k]
 	})
-	if c.AccessToken != "" || c.UserID != "" || c.RefreshToken != "new-refresh" {
-		t.Fatal("old access token survived refresh override")
+	if err != nil || c.ClientID != "app" || c.ClientSecret != "secret" {
+		t.Fatal("app setup failed")
 	}
 }
 

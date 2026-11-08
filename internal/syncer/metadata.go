@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/hayatky/xstash-cli/internal/store"
 	"github.com/hayatky/xstash-cli/internal/xapi"
@@ -10,9 +11,17 @@ import (
 	"strings"
 )
 
-func ResolveMetadata(ctx context.Context, s *store.Store, c *xapi.Client) error {
+func ResolveMetadata(ctx context.Context, s *store.Store, c *xapi.Client, maxPosts int) error {
+	if maxPosts < 0 {
+		return fmt.Errorf("metadata lookup limit must be nonnegative")
+	}
+	var incomplete []error
+	lookedUp := 0
 	attempted := map[string]bool{}
 	for {
+		if err := s.PruneCachedMetadata(ctx); err != nil {
+			return err
+		}
 		pending, err := s.PendingMetadata(ctx, 1000000)
 		if err != nil {
 			return err
@@ -24,7 +33,16 @@ func ResolveMetadata(ctx context.Context, s *store.Store, c *xapi.Client) error 
 			}
 		}
 		if len(ids) == 0 {
-			return nil
+			return errors.Join(incomplete...)
+		}
+		if maxPosts > 0 {
+			remaining := maxPosts - lookedUp
+			if remaining == 0 {
+				return errors.Join(incomplete...)
+			}
+			if len(ids) > remaining {
+				ids = ids[:remaining]
+			}
 		}
 		if c.LookupLimit != nil {
 			limit, e := c.LookupLimit(ctx)
@@ -34,10 +52,14 @@ func ResolveMetadata(ctx context.Context, s *store.Store, c *xapi.Client) error 
 				}
 				return e
 			}
+			if limit < 1 || limit > 100 {
+				return fmt.Errorf("lookup batch size must be 1..100")
+			}
 			if limit < len(ids) {
 				ids = ids[:limit]
 			}
 		}
+		lookedUp += len(ids)
 		for _, id := range ids {
 			attempted[id] = true
 		}
@@ -74,7 +96,7 @@ func ResolveMetadata(ctx context.Context, s *store.Store, c *xapi.Client) error 
 			if err = s.MetadataReason(ctx, missing, "lookup did not return post"); err != nil {
 				return err
 			}
-			return fmt.Errorf("metadata lookup did not return %d posts", len(missing))
+			incomplete = append(incomplete, fmt.Errorf("metadata lookup did not return %d posts", len(missing)))
 		}
 	}
 }

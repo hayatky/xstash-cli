@@ -17,7 +17,7 @@ func (s *Store) PendingQuotes(ctx context.Context, limit int) ([]QuoteWork, erro
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be positive")
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,depth,status,reason FROM quote_queue WHERE status IN ('pending','temporary_failure','budget','inaccessible','unavailable') ORDER BY depth,id LIMIT ?`, limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,depth,status,reason FROM quote_queue WHERE status IN ('pending','temporary_failure','budget','inaccessible','unavailable') ORDER BY depth,CASE WHEN status='pending' THEN 0 ELSE 1 END,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

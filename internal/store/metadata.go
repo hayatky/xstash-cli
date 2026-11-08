@@ -6,8 +6,20 @@ import (
 	"fmt"
 )
 
+// PruneCachedMetadata avoids fetching a post again when all its details are
+// already available, including details received with a quote lookup.
+func (s *Store) PruneCachedMetadata(ctx context.Context) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM metadata_queue WHERE EXISTS (
+		SELECT 1 FROM posts p JOIN users u ON u.id=p.author_id WHERE p.id=metadata_queue.id
+	) AND NOT EXISTS (
+		SELECT 1 FROM post_media pm LEFT JOIN media m ON m.media_key=pm.media_key
+		WHERE pm.post_id=metadata_queue.id AND m.media_key IS NULL
+	)`)
+	return err
+}
+
 func (s *Store) PendingMetadata(ctx context.Context, limit int) ([]string, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id FROM metadata_queue ORDER BY id LIMIT ?`, limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id FROM metadata_queue ORDER BY CASE WHEN reason='pending' THEN 0 ELSE 1 END,id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

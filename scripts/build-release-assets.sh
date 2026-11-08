@@ -82,11 +82,22 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
-if [[ "$SKIP_BUILD" != "true" ]]; then
-  bash "$ROOT_DIR/scripts/build-binaries.sh" "$DIST_DIR"
+if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || [[ ! "$BIN_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "error: invalid version or binary name" >&2
+  exit 1
 fi
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$DIST_DIR" "$OUT_DIR"
+DIST_DIR="$(cd "$DIST_DIR" && pwd)"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+if [[ -e "$OUT_DIR/SHA256SUMS.txt" ]] || compgen -G "$OUT_DIR/$BIN_NAME-$VERSION-*" >/dev/null; then
+  echo "error: release assets already exist; choose a fresh --out directory" >&2
+  exit 1
+fi
+
+if [[ "$SKIP_BUILD" != "true" ]]; then
+  VERSION="$VERSION" BIN_NAME="$BIN_NAME" bash "$ROOT_DIR/scripts/build-binaries.sh" "$DIST_DIR"
+fi
 
 TARGETS=(
   "linux-x64:linux-amd64:"
@@ -94,6 +105,21 @@ TARGETS=(
   "macos-arm64:darwin-arm64:"
   "windows-x64:windows-amd64:.exe"
 )
+
+for entry in "${TARGETS[@]}"; do
+  platform="${entry%%:*}"
+  ext="${entry##*:}"
+  if [[ ! -f "$DIST_DIR/$platform/${BIN_NAME}${ext}" ]]; then
+    echo "error: binary not found for $platform" >&2
+    exit 1
+  fi
+done
+for doc in README.md README.ja.md LICENSE CHANGELOG.md docs/migration-v2.md docs/releases/v2.0.0.md; do
+  if [[ ! -f "$ROOT_DIR/$doc" ]]; then
+    echo "error: required release document missing: $doc" >&2
+    exit 1
+  fi
+done
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
@@ -125,6 +151,11 @@ for entry in "${TARGETS[@]}"; do
   package_dir="$TMP_DIR/$package_base"
   mkdir -p "$package_dir"
   cp "$src_binary" "$package_dir/${BIN_NAME}${ext}"
+  cp "$ROOT_DIR/README.md" "$ROOT_DIR/README.ja.md" "$ROOT_DIR/LICENSE" "$ROOT_DIR/CHANGELOG.md" "$package_dir/"
+  mkdir -p "$package_dir/docs/releases"
+  cp "$ROOT_DIR/docs/"*.md "$package_dir/docs/"
+  cp "$ROOT_DIR/docs/releases/v2.0.0.md" "$package_dir/docs/releases/"
+  cp -R "$ROOT_DIR/skills" "$package_dir/skills"
 
   if [[ "$platform" == "windows-x64" ]]; then
     asset_path="$OUT_DIR/${package_base}.zip"

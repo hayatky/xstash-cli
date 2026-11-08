@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestPKCEAndRefresh(t *testing.T) {
 		if r.FormValue("grant_type") != "refresh_token" || r.FormValue("refresh_token") != "old" {
 			t.Error("invalid refresh request")
 		}
-		return response(200, `{"access_token":"new","refresh_token":"rotated","expires_in":3600}`), nil
+		return response(200, `{"access_token":"new","refresh_token":"rotated","expires_in":3600,"token_type":"bearer"}`), nil
 	})}
 	token, err := Exchange(context.Background(), client, "https://example.invalid/token", "client", "", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"old"}})
 	if err != nil || token.RefreshToken != "rotated" {
@@ -37,5 +38,20 @@ func TestOAuthDoesNotForwardCredentialsOnRedirect(t *testing.T) {
 	})}
 	if _, err := Exchange(context.Background(), client, "https://example.invalid/token", "id", "secret", url.Values{}); err == nil || calls != 1 {
 		t.Fatalf("redirect followed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestOAuthRejectsMissingTypeAndInvalidExpiry(t *testing.T) {
+	for _, body := range []string{
+		`{"access_token":"synthetic","expires_in":3600}`,
+		`{"access_token":"synthetic","expires_in":3600,"token_type":"Bearer"} {}`,
+		`{"access_token":"synthetic","expires_in":3600,"token_type":"Bearer"}` + strings.Repeat(" ", 1<<20),
+		`{"access_token":"synthetic","expires_in":3600,"token_type":"mac"}`,
+		`{"access_token":"synthetic","expires_in":9223372036854775807,"token_type":"Bearer"}`,
+	} {
+		client := &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) { return response(200, body), nil })}
+		if _, err := Exchange(context.Background(), client, "https://example.invalid/token", "app", "", url.Values{}); err == nil {
+			t.Fatal("invalid token response accepted")
+		}
 	}
 }

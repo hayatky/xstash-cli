@@ -3,6 +3,7 @@ package xapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -75,5 +76,49 @@ func TestNoUnaccountedRedirect(t *testing.T) {
 	})}
 	if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{}); err == nil || calls != 1 {
 		t.Fatalf("redirect followed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestRefreshFailureStopsLaterRequests(t *testing.T) {
+	calls, refreshes, accounted := 0, 0, 0
+	c := New("synthetic")
+	c.HTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) { calls++; return response(401, "{}"), nil })}
+	c.BeforeRequest = func(context.Context, string, url.Values) error { accounted++; return nil }
+	c.OnUnauthorized = func(context.Context) (string, error) {
+		refreshes++
+		return "", fmt.Errorf("synthetic refresh persistence failure")
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{}); err == nil {
+			t.Fatal("failed refresh accepted")
+		}
+	}
+	if calls != 1 || refreshes != 1 || accounted != 1 {
+		t.Fatalf("work continued after refresh failure: requests=%d refreshes=%d reservations=%d", calls, refreshes, accounted)
+	}
+}
+
+func TestOversizedResponseRetainsUncertainOutcome(t *testing.T) {
+	for _, status := range []int{200, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			c := New("synthetic")
+			c.BeforeRequest = func(context.Context, string, url.Values) error { return nil }
+			calls := 0
+			c.HTTP = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return response(status, strings.Repeat(" ", maxResponseBytes+1)), nil
+			})}
+			accounted := false
+			c.AfterRequest = func(_ context.Context, _ string, gotStatus int, body []byte, readErr error) error {
+				accounted = true
+				if gotStatus != status || len(body) != maxResponseBytes || readErr == nil {
+					t.Fatalf("status=%d len=%d readErr=%v", gotStatus, len(body), readErr)
+				}
+				return nil
+			}
+			if _, _, err := c.Get(context.Background(), "/2/tweets", url.Values{"ids": {"1"}}); err == nil || !accounted || calls != 1 {
+				t.Fatalf("err=%v accounted=%v calls=%d", err, accounted, calls)
+			}
+		})
 	}
 }

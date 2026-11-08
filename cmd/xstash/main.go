@@ -39,8 +39,18 @@ func flags(name string, errout io.Writer) *flag.FlagSet {
 	return f
 }
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 1 {
+		switch args[0] {
+		case "version", "--version", "-v":
+			_, err := fmt.Fprintf(stdout, "xstash %s (%s)\n", version, commit)
+			return err
+		case "help", "--help", "-h":
+			_, err := io.WriteString(stdout, usage)
+			return err
+		}
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: xstash <config|sync|export|stats|pending|complete>")
+		return fmt.Errorf("usage: xstash <config|db|sync|export|stats|pending|complete|version>; use --help")
 	}
 	configPath, dbPath, err := config.Paths()
 	if err != nil {
@@ -60,16 +70,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	config.ApplyEnv(&c, os.Getenv)
+	if err = config.ApplyEnv(&c, os.Getenv); err != nil {
+		return err
+	}
 	cmd := args[0]
 	args = args[1:]
 	if cmd == "config" {
 		if len(args) == 0 {
-			return fmt.Errorf("usage: config <init|set|show>")
+			return fmt.Errorf("usage: config <init|import|set|show>")
 		}
 		switch args[0] {
 		case "show":
-			return jsonOut(stdout, map[string]any{"client_id": c.ClientID, "user_id": c.UserID, "access_token_set": c.AccessToken != "", "refresh_token_set": c.RefreshToken != "", "lookup_batch_size": c.LookupBatchSize, "owned_post_microusd": c.OwnedPostMicrousd, "post_microusd": c.PostMicrousd, "user_microusd": c.UserMicrousd, "media_microusd": c.MediaMicrousd, "owned_eligible": c.OwnedEligible})
+			return jsonOut(stdout, map[string]any{"client_id": c.ClientID, "user_id": c.UserID, "access_token_set": c.AccessToken != "", "refresh_token_set": c.RefreshToken != "", "expires_at": c.ExpiresAt, "token_type": c.TokenType, "scope": c.Scope, "scope_source": c.ScopeSource, "refresh_state": c.RefreshState, "refresh_started_at": c.RefreshStartedAt, "auth_metadata_valid": auth.Ready(c) == nil, "lookup_batch_size": c.LookupBatchSize, "owned_post_microusd": c.OwnedPostMicrousd, "post_microusd": c.PostMicrousd, "user_microusd": c.UserMicrousd, "media_microusd": c.MediaMicrousd, "owned_eligible": c.OwnedEligible})
+		case "import":
+			return importCommand(ctx, args[1:], stdout, stderr, &c, configPath)
 		case "init":
 			f := flags("config init", stderr)
 			id := f.String("client-id", c.ClientID, "OAuth client ID")
@@ -111,15 +125,44 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("unknown config subcommand")
 		}
 	}
-	if err = os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
-		return err
+	if cmd == "db" && len(args) == 1 && args[0] == "init" {
+		if err = os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+			return err
+		}
+		guard, e := lock.Acquire(dbPath + ".lock")
+		if e != nil {
+			return e
+		}
+		defer guard.Close()
+		s, e := store.Open(dbPath)
+		if e != nil {
+			return e
+		}
+		if e = s.Close(); e != nil {
+			return e
+		}
+		return jsonOut(stdout, map[string]any{"database_initialized": true})
 	}
-	s, err := store.Open(dbPath)
+	switch cmd {
+	case "db":
+		if len(args) != 1 || args[0] != "check" {
+			return fmt.Errorf("usage: db <init|check>")
+		}
+	case "sync", "export", "stats", "pending", "complete":
+	default:
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+	s, err := store.OpenExisting(dbPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open existing database (verify XSTASH_HOME; use db init only for a new database): %w", err)
 	}
 	defer s.Close()
 	switch cmd {
+	case "db":
+		if err := s.CheckIntegrity(); err != nil {
+			return err
+		}
+		return jsonOut(stdout, map[string]any{"database_exists": true, "schema_version": 1, "quick_check": "ok", "foreign_key_check": "ok"})
 	case "sync":
 		return syncCommand(ctx, args, stdout, stderr, s, &c, configPath, dbPath)
 	case "export":
@@ -189,15 +232,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s *store.Store, c *config.Config, configPath, dbPath string) (err error) {
 	f := flags("sync", stderr)
 	kind := f.String("kind", "both", "bookmark, like, both")
-	full := f.Bool("full", false, "scan all pages")
+	full := f.Bool("full", false, "ignore known boundaries and initial limits; max-pages still applies")
 	size := f.Int("page-size", 5, "results per page")
-	threshold := f.Int("known-threshold", 5, "consecutive known relations")
-	maxNew := f.Int("max-new", 0, "new relations per kind, 0 for unlimited")
+	threshold := f.Int("known-threshold", 1, "consecutive known relations")
+	maxNew := f.Int("max-new", 0, "new relations per kind, 0 for unlimited; partial runs do not advance the baseline")
+	initialBookmarks := f.Int("initial-bookmarks", 100, "recent bookmarks in the first completed window, 0 for all")
+	initialLikes := f.Int("initial-likes", 50, "recent likes in the first completed window, 0 for all")
+	maxPages := f.Int("max-pages", 20, "pages per kind per run, 0 for unlimited; partial runs restart from the top")
+	quoteDepth := f.Int("quote-depth", 1, "quote levels to resolve, 0..3")
+	maxQuotes := f.Int("max-quote-lookups", 50, "missing quoted posts to look up per run, 0 for unlimited")
+	metadata := f.Bool("metadata", false, "fetch missing author and media details (extra API cost)")
+	maxMetadata := f.Int("max-metadata-lookups", 50, "posts to look up for metadata per run, 0 for unlimited")
 	downloadMedia := f.Bool("media", false, "download available media files")
 	if err = f.Parse(args); err != nil {
 		return err
 	}
-	if *threshold < 1 || *maxNew < 0 || *size < 1 || *size > 100 {
+	if *threshold < 1 || *maxNew < 0 || *size < 1 || *size > 100 || *initialBookmarks < 0 || *initialLikes < 0 || *maxPages < 0 || *quoteDepth < 0 || *quoteDepth > 3 || *maxQuotes < 0 || *maxMetadata < 0 {
 		return fmt.Errorf("invalid sync options")
 	}
 	kinds := []string{}
@@ -215,7 +265,11 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if c.AccessToken == "" && c.RefreshToken == "" {
 		return fmt.Errorf("authenticate first with config init")
 	}
-	if c.MediaMicrousd <= 0 {
+	if err = auth.Ready(*c); err != nil {
+		return err
+	}
+	resolveMetadata := *metadata || *downloadMedia
+	if resolveMetadata && c.MediaMicrousd <= 0 {
 		return fmt.Errorf("media read price is unknown; set --media-microusd after checking Developer Console")
 	}
 	l, e := lock.Acquire(dbPath + ".lock")
@@ -250,8 +304,10 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	client := xapi.New(c.AccessToken)
 	acct := syncer.Accountant{Store: s, Config: *c, RunID: id}
 	acct.Attach(client)
+	var authFailure error
 	client.OnUnauthorized = func(ctx context.Context) (string, error) {
 		if e := auth.Refresh(ctx, c, configPath); e != nil {
+			authFailure = e
 			return "", e
 		}
 		return c.AccessToken, nil
@@ -270,6 +326,8 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 			return e
 		}
 	}
+	// The first identity lookup happens after the accountant is constructed.
+	acct.Config.UserID = c.UserID
 	if e = s.BindOwner(ctx, c.UserID); e != nil {
 		return e
 	}
@@ -280,7 +338,11 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 		if e = s.DB.QueryRowContext(ctx, `SELECT full FROM sync_resume WHERE kind=?`, k).Scan(&resumeFull); e != nil {
 			return e
 		}
-		r, e := syncer.RunKind(ctx, s, client, c.UserID, k, syncer.Options{Full: resumeFull != 0, PageSize: *size, Threshold: *threshold, MaxNew: *maxNew})
+		initialLimit := *initialBookmarks
+		if k == "like" {
+			initialLimit = *initialLikes
+		}
+		r, e := syncer.RunKind(ctx, s, client, c.UserID, k, syncer.Options{Full: resumeFull != 0, PageSize: *size, Threshold: *threshold, MaxNew: *maxNew, InitialLimit: initialLimit, MaxPages: *maxPages})
 		results = append(results, r)
 		if r.Complete && e == nil {
 			if _, dbErr := s.DB.ExecContext(ctx, `DELETE FROM sync_resume WHERE kind=?`, k); dbErr != nil {
@@ -303,11 +365,22 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 			break
 		}
 	}
-	if e = syncer.ResolveQuotes(ctx, s, client); e != nil {
+	if authFailure != nil {
+		return errors.Join(failures...)
+	}
+	if e = syncer.ResolveQuotes(ctx, s, client, syncer.QuoteOptions{Depth: *quoteDepth, MaxPosts: *maxQuotes, Metadata: resolveMetadata}); e != nil {
 		failures = append(failures, e)
 	}
-	if e = syncer.ResolveMetadata(ctx, s, client); e != nil {
-		failures = append(failures, e)
+	if authFailure != nil {
+		return errors.Join(failures...)
+	}
+	if resolveMetadata {
+		if e = syncer.ResolveMetadata(ctx, s, client, *maxMetadata); e != nil {
+			failures = append(failures, e)
+		}
+	}
+	if authFailure != nil {
+		return errors.Join(failures...)
 	}
 	if *downloadMedia {
 		if _, e = media.Download(ctx, s, filepath.Join(filepath.Dir(dbPath), "media")); e != nil {
@@ -342,6 +415,13 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if e != nil {
 		return e
 	}
+	var activeQuotes, deferredQuotes int
+	if e = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM quote_queue WHERE status!='resolved' AND depth<=?`, *quoteDepth).Scan(&activeQuotes); e != nil {
+		return e
+	}
+	if e = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM quote_queue WHERE status!='resolved' AND depth>?`, *quoteDepth).Scan(&deferredQuotes); e != nil {
+		return e
+	}
 	if len(failures) == 0 {
 		status = "completed"
 		for _, result := range results {
@@ -350,16 +430,14 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 				break
 			}
 		}
-		for k, n := range quotes {
-			if k != "resolved" && n > 0 {
-				status = "partial"
-			}
+		if activeQuotes > 0 {
+			status = "partial"
 		}
-		if pendingMetadata > 0 {
+		if resolveMetadata && pendingMetadata > 0 {
 			status = "partial"
 		}
 	}
-	if e = jsonOut(stdout, map[string]any{"run_id": id, "status": status, "results": results, "quotes": quotes, "quote_reasons": reasons, "pending_metadata": pendingMetadata, "metadata_reasons": metadataReasons, "requests": requestCount, "retrieved_resources": resourceCount, "estimated_microusd": estimated, "uncertain_reserved_microusd": uncertain, "currency": "USD", "current_month": month}); e != nil {
+	if e = jsonOut(stdout, map[string]any{"run_id": id, "status": status, "results": results, "policy": map[string]any{"full_requested": *full, "max_new_per_kind": *maxNew, "initial_bookmarks": *initialBookmarks, "initial_likes": *initialLikes, "page_size": *size, "known_threshold": *threshold, "max_pages_per_kind": *maxPages, "quote_depth": *quoteDepth, "max_quote_lookups": *maxQuotes, "metadata_requested": resolveMetadata, "max_metadata_lookups": *maxMetadata, "monthly_spend_cap": false}, "deferred_quotes": deferredQuotes, "quotes": quotes, "quote_reasons": reasons, "pending_metadata": pendingMetadata, "metadata_reasons": metadataReasons, "requests": requestCount, "retrieved_resources": resourceCount, "estimated_microusd": estimated, "uncertain_reserved_microusd": uncertain, "currency": "USD", "current_month": month}); e != nil {
 		return e
 	}
 	if len(failures) > 0 {
@@ -377,7 +455,11 @@ func currentMonth(ctx context.Context, s *store.Store, now time.Time) (map[strin
 	if err := s.DB.QueryRowContext(ctx, `SELECT coalesce(sum(amount_microusd),0) FROM budget_reservations WHERE state='reserved' AND substr(created_at,1,7)=?`, month).Scan(&uncertain); err != nil {
 		return nil, err
 	}
-	return map[string]any{"month_utc": month, "requests": req, "resources": res, "estimated_microusd": cost, "estimated_usd": float64(cost) / 1000000, "uncertain_max_microusd": uncertain, "uncertain_max_usd": float64(uncertain) / 1000000, "basis": "local estimate; excludes other clients and actual invoices"}, nil
+	details, err := s.CostDetails(ctx, month)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"cost_details": details, "month_utc": month, "requests": req, "resources": res, "estimated_microusd": cost, "estimated_usd": float64(cost) / 1000000, "uncertain_max_microusd": uncertain, "uncertain_max_usd": float64(uncertain) / 1000000, "actual_usd": nil, "basis": "historical local estimate at recorded rates; not repriced by current settings; excludes other clients and actual invoices"}, nil
 }
 func metadataCounts(ctx context.Context, s *store.Store) (map[string]int, error) {
 	rows, e := s.DB.QueryContext(ctx, `SELECT reason,count(*) FROM metadata_queue GROUP BY reason`)

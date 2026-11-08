@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -30,47 +29,7 @@ type Reference struct {
 	Type string `json:"type"`
 }
 
-func Open(path string) (*Store, error) {
-	if path != ":memory:" {
-		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if err == nil {
-			if err = f.Close(); err != nil {
-				return nil, err
-			}
-		} else if !os.IsExist(err) {
-			return nil, err
-		}
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	s := &Store{DB: db}
-	var tables, marker int
-	if err = db.QueryRow(`SELECT count(*), coalesce(sum(name='xstash_go_meta'),0) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&tables, &marker); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("inspect database: %w", err)
-	}
-	if tables > 0 && marker == 0 {
-		db.Close()
-		return nil, fmt.Errorf("database is not an xstash Go database; choose a separate database path")
-	}
-	if marker != 0 {
-		var version int
-		if err = db.QueryRow(`SELECT version FROM xstash_go_meta`).Scan(&version); err != nil || version != 1 {
-			db.Close()
-			return nil, fmt.Errorf("unsupported or invalid xstash Go database schema")
-		}
-	}
-	if path != ":memory:" {
-		if err = os.Chmod(path, 0600); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-	_, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
- BEGIN;
+const schemaV1 = `BEGIN;
  CREATE TABLE IF NOT EXISTS xstash_go_meta(version INTEGER NOT NULL);
  INSERT INTO xstash_go_meta(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM xstash_go_meta);
  CREATE TABLE IF NOT EXISTS database_owner(singleton INTEGER PRIMARY KEY CHECK(singleton=1), user_id TEXT NOT NULL);
@@ -92,13 +51,8 @@ func Open(path string) (*Store, error) {
  CREATE TABLE IF NOT EXISTS budget_reservations(id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, created_at TEXT NOT NULL, amount_microusd INTEGER NOT NULL, state TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS idx_relations_seen ON relations(kind,last_seen_at);
  CREATE INDEX IF NOT EXISTS idx_requests_date ON api_requests(requested_at);
- COMMIT;`)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("initialize database: %w", err)
-	}
-	return s, nil
-}
+ COMMIT;`
+
 func (s *Store) Close() error { return s.DB.Close() }
 func Now() string             { return time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z") }
 func (s *Store) Known(ctx context.Context, kind, id string) (bool, error) {

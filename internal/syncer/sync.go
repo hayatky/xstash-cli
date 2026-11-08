@@ -10,20 +10,24 @@ import (
 )
 
 type Options struct {
-	Kinds     []string
-	Full      bool
-	PageSize  int
-	Threshold int
-	MaxNew    int
+	Kinds        []string
+	Full         bool
+	PageSize     int
+	Threshold    int
+	MaxNew       int
+	InitialLimit int
+	MaxPages     int
 }
 type Result struct {
-	Kind      string `json:"kind"`
-	New       int    `json:"new_relations"`
-	NewPosts  int    `json:"new_posts"`
-	Retrieved int    `json:"retrieved_posts"`
-	Pages     int    `json:"pages"`
-	Complete  bool   `json:"complete"`
-	Reason    string `json:"reason"`
+	Kind            string `json:"kind"`
+	Mode            string `json:"mode"`
+	New             int    `json:"new_relations"`
+	NewPosts        int    `json:"new_posts"`
+	Retrieved       int    `json:"retrieved_posts"`
+	Pages           int    `json:"pages"`
+	Complete        bool   `json:"complete"`
+	HistoryComplete bool   `json:"history_complete"`
+	Reason          string `json:"reason"`
 }
 
 func UserID(ctx context.Context, c *xapi.Client) (string, error) {
@@ -50,12 +54,29 @@ func RunKind(ctx context.Context, s *store.Store, c *xapi.Client, user, kind str
 	}
 	initial := cutoff == ""
 	full := o.Full || initial
+	boundedInitial := initial && !o.Full && o.InitialLimit > 0
+	r.Mode = "incremental"
+	if o.Full {
+		r.Mode = "full"
+	} else if boundedInitial {
+		r.Mode = "initial_window"
+	} else if initial {
+		r.Mode = "initial_full"
+	}
 	boundary := Boundary{Initial: full, Threshold: o.Threshold}
 	token := ""
 	seenTokens := map[string]bool{}
 	seenPosts := map[string]bool{}
 	for {
-		p, _, e := c.Page(ctx, user, kind, o.PageSize, token)
+		size := o.PageSize
+		if boundedInitial && o.InitialLimit-r.Retrieved < size {
+			size = o.InitialLimit - r.Retrieved
+			// Likes require at least five results. Keep all already-paid results.
+			if kind == "like" && size < 5 {
+				size = 5
+			}
+		}
+		p, _, e := c.Page(ctx, user, kind, size, token)
 		if e != nil {
 			r.Reason = e.Error()
 			return r, e
@@ -82,7 +103,9 @@ func RunKind(ctx context.Context, s *store.Store, c *xapi.Client, user, kind str
 			if e != nil {
 				return r, e
 			}
-			stop = boundary.Observe(known)
+			if boundary.Observe(known) {
+				stop = true
+			}
 		}
 		n, e := s.SavePageWithIncludes(ctx, kind, posts, p.Includes.Users, p.Includes.Media, store.Now())
 		if e != nil {
@@ -101,6 +124,7 @@ func RunKind(ctx context.Context, s *store.Store, c *xapi.Client, user, kind str
 				return r, err
 			}
 			r.Complete = true
+			r.HistoryComplete = true
 			return r, nil
 		}
 		if stop {
@@ -109,6 +133,20 @@ func RunKind(ctx context.Context, s *store.Store, c *xapi.Client, user, kind str
 				return r, err
 			}
 			r.Complete = true
+			return r, nil
+		}
+		if boundedInitial && r.Retrieved >= o.InitialLimit {
+			// A recent window is an incremental baseline, not proof that
+			// older relations disappeared. Never reconcile omissions here.
+			r.Reason = "initial_limit"
+			if err = s.FinishKind(ctx, kind, start, false); err != nil {
+				return r, err
+			}
+			r.Complete = true
+			return r, nil
+		}
+		if o.MaxPages > 0 && r.Pages >= o.MaxPages {
+			r.Reason = "max_pages"
 			return r, nil
 		}
 		if o.MaxNew > 0 && r.New >= o.MaxNew {
