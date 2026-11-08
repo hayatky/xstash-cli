@@ -108,13 +108,13 @@ func TestQuoteLookupResumesAndCaches(t *testing.T) {
 		return mockResponse(404, ""), nil
 	})}
 	c.BeforeRequest = func(context.Context, string, url.Values) error { return nil }
-	if e = ResolveQuotes(ctx, s, c); e != nil {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e != nil {
 		t.Fatal(e)
 	}
 	if n != 3 {
 		t.Fatalf("calls %d", n)
 	}
-	if e = ResolveQuotes(ctx, s, c); e != nil || n != 3 {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e != nil || n != 3 {
 		t.Fatalf("cache not reused %d %v", n, e)
 	}
 }
@@ -235,7 +235,7 @@ func TestUnavailableQuoteRemainsVisible(t *testing.T) {
 	c.HTTP = &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
 		return mockResponse(200, `{"errors":[{"resource_id":"2","title":"Not Found","type":"resource-not-found"}]}`), nil
 	})}
-	if e = ResolveQuotes(ctx, s, c); e != nil {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e != nil {
 		t.Fatal(e)
 	}
 	var status string
@@ -245,7 +245,7 @@ func TestUnavailableQuoteRemainsVisible(t *testing.T) {
 	c.HTTP = &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
 		return mockResponse(200, `{"data":[{"id":"2","text":"available again"}]}`), nil
 	})}
-	if e = ResolveQuotes(ctx, s, c); e != nil {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.DB.QueryRow(`SELECT status FROM quote_queue WHERE id='2'`).Scan(&status); e != nil || status != "resolved" {
@@ -266,7 +266,7 @@ func TestLookupFailureLeavesQuotesForResume(t *testing.T) {
 	c := xapi.New("test")
 	c.BeforeRequest = func(context.Context, string, url.Values) error { return nil }
 	c.LookupLimit = func(context.Context) (int, error) { return 0, fmt.Errorf("invalid lookup settings") }
-	if e = ResolveQuotes(ctx, s, c); e == nil {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e == nil {
 		t.Fatal("expected lookup settings error")
 	}
 	var status string
@@ -277,7 +277,7 @@ func TestLookupFailureLeavesQuotesForResume(t *testing.T) {
 	c.HTTP = &http.Client{Transport: transport(func(r *http.Request) (*http.Response, error) {
 		return mockResponse(200, `{"data":[{"id":"2","text":"quote"}]}`), nil
 	})}
-	if e = ResolveQuotes(ctx, s, c); e != nil {
+	if e = ResolveQuotes(ctx, s, c, QuoteOptions{Depth: 3}); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.DB.QueryRow(`SELECT status FROM quote_queue WHERE id='2'`).Scan(&status); e != nil || status != "resolved" {
@@ -334,7 +334,7 @@ func TestRepeatedKnownIDCannotFormBoundary(t *testing.T) {
 	}
 }
 
-func TestNewPostAfterKnownStreakContinuesScan(t *testing.T) {
+func TestKnownBoundaryStaysLatchedAndPreservesWholePage(t *testing.T) {
 	ctx := context.Background()
 	s, e := store.Open(filepath.Join(t.TempDir(), "db"))
 	if e != nil {
@@ -358,7 +358,10 @@ func TestNewPostAfterKnownStreakContinuesScan(t *testing.T) {
 		return mockResponse(200, `{"data":[{"id":"3"}],"meta":{"result_count":1}}`), nil
 	})}
 	r, e := RunKind(ctx, s, c, "123", "bookmark", Options{PageSize: 5, Threshold: 1})
-	if e != nil || calls != 2 || r.New != 2 {
-		t.Fatalf("stopped after boundary was disproven: %+v %d %v", r, calls, e)
+	if e != nil || calls != 1 || r.New != 1 || r.Retrieved != 2 || r.Reason != "known_boundary" {
+		t.Fatalf("boundary not latched: %+v %d %v", r, calls, e)
+	}
+	if has, err := s.HasPost(ctx, "2"); err != nil || !has {
+		t.Fatal("already-fetched post after boundary lost")
 	}
 }

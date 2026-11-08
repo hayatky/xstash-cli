@@ -30,7 +30,7 @@ Open the authorization URL printed to stderr. The loopback callback has a 120-se
 
 Refresh writes a durable `pending` marker before sending the token. HTTP errors (including 429/5xx), lost/invalid responses and interrupted refreshes leave the marker and stop future automatic refresh and sync. A failed final save stops the current process too. If replacement succeeded but directory fsync failed, a later process may see the new credentials with the marker cleared; this does not replay the old token. The same process stops later API and media work after any refresh error. Recover by fixing any local storage problem and completing `config init` through a supported OAuth callback. Do not clear the marker, restore an old token file, or run an older CLI that ignores the marker: these can replay a potentially consumed token. A replacement token lost with its response or a failed save cannot be reconstructed by this CLI. Atomic replacement and Unix directory fsync improve local durability but do not make remote rotation and local storage one transaction; power-loss and Windows directory durability are not guaranteed.
 
-Before syncing, check **all** rates and applicability in your [Developer Console](https://console.x.com/). In particular, the documentation does not establish how media expansions are charged: this program refuses to sync until you explicitly configure a positive conservative media price. Amounts below are millionths of USD, not dollars; 5000 means $0.005. This command is an example, not a claim about the media price:
+Before syncing, check **all** rates and applicability in your [Developer Console](https://console.x.com/). In particular, the documentation does not establish how media expansions are charged: `--metadata` and `--media` require a positive conservative media price. Default text-only sync does not request those expansions and works without a media price. Amounts below are millionths of USD, not dollars; 5000 means $0.005. This command is an example, not a claim about the media price:
 
 ```sh
 xstash config set --media-microusd 5000
@@ -46,10 +46,10 @@ If a spending limit is configured in the Developer Console, X may still block re
 ```sh
 xstash db init                         # only when deliberately creating a NEW database
 xstash db check                        # require and inspect the existing database, offline
-xstash sync --kind both                 # small incremental pages; initial sync scans all pages
-xstash sync --kind bookmark --full     # full scan
-xstash sync --kind like --page-size 5 --known-threshold 5
-xstash sync --kind both --max-new 100 --media
+xstash sync --kind both                # first: 100 bookmarks + 50 likes; later: pages of 5
+xstash sync --kind bookmark --full --max-pages 0  # explicit full history, higher cost
+xstash sync --kind like --page-size 5 --known-threshold 1
+xstash sync --metadata --max-metadata-lookups 20  # optional author/media details
 xstash stats
 xstash export --format json --include-referenced --output bookmarks.json
 xstash export --format markdown --output bookmarks.md
@@ -58,11 +58,23 @@ xstash pending --purpose analysis --limit 100
 xstash complete --purpose analysis --id 123456789
 ```
 
-`sync` accepts `bookmark`, `like`, or `both`; page sizes are 1–100 for bookmarks and 5–100 for likes. `--max-new 0` is unlimited. A page is stored atomically, so the new-relation limit can be exceeded by the remainder of one page. `--full` scans to the end; only a successful end-of-list marks previously observed relations as no longer seen. An incremental known streak is a cost/completeness trade-off: reordering can hide older new items, so perform a full scan when completeness matters. An interrupted scan remains queued and starts again from the beginning on the next matching sync because X pagination tokens may expire. An interrupted full scan remains a full scan on resume.
+`sync` accepts `bookmark`, `like`, or `both`. The defaults are:
 
-Quotes are always traversed breadth-first up to three links, using cached posts first and batched lookups. Pending, temporary, inaccessible and unavailable quotes are reported by status. An X “not found” response does not prove deletion and is recorded as unavailable. Optional media downloads use X media hosts only; failures appear as errors. Exports do not overwrite an existing output file.
+- First completed sync for each kind: the most recent 100 bookmarks or 50 likes (`--initial-bookmarks`, `--initial-likes`). This establishes a recent-window baseline without importing older history. Setting either to `0` removes that window limit; page limits still apply.
+- Later syncs: five results per page, stopping after the first relation known at the last completed sync. Once found, the boundary stays latched for that page, even if a later item is new. The entire fetched page is saved.
+- At most 20 list pages per kind per run (`--max-pages`). A capped run is partial and does not advance the baseline. It restarts from the top next time, so raise this limit or set it to `0` if the backlog cannot fit; repeating the same small limit may not progress past it.
+- Quotes: one link deep (`--quote-depth 0..3`), breadth-first and cache-first, with at most 50 uncached posts looked up per run (`--max-quote-lookups`; `0` is unlimited). Deeper work stays queued and can be enabled later. Retries can repeat a request; these counts are not a dollar ceiling.
+- Author/media enrichment is off. `--metadata` enables it with at most 50 post lookups per run (`--max-metadata-lookups`; `0` is unlimited). `--media` also enables enrichment, then downloads available files from X media hosts. Both add cost.
 
-List pages omit author and media expansions to avoid fetching them again for known posts. New posts are queued for a separate metadata lookup after quote processing; unfinished lookups are retried during a later sync. Whether owned reads and subsequent normal lookups for the same post are deduplicated at the published rates remains unverified.
+Page sizes are 1–100 for bookmarks and 5–100 for likes. The last initial page is shortened when possible; a custom like limit can be exceeded by up to four posts because of X's minimum page size. `--max-new 0` is unlimited, subject to the other limits; a nonzero limit can be exceeded by the remainder of a fetched page and leaves the run partial. The initial window counts retrieved items, including items from a failed previous attempt, rather than only newly inserted relations.
+
+`complete: true` means the selected sync window completed, not that all history was imported. An initial window ends with `reason: "initial_limit"` and `history_complete: false`; only a successful end-of-list reports `history_complete: true` and marks missing relations no longer seen. A bounded initial import never marks older unseen relations absent. The output's `policy` records the chosen limits and each result's `mode` shows the effective initial, incremental or full mode; `deferred_quotes` and `pending_metadata` expose omitted enrichment. Intentionally deferred work does not make the selected scope fail, while unfinished in-scope work makes `status` partial.
+
+Known-relation stopping trades completeness for cost: reordering can hide older new items. Use `--full --max-pages 0` when full history is needed, with the associated API cost. Interrupted scans remain queued and restart at the beginning because X pagination tokens may expire. An interrupted full scan **remains full even on a later plain sync**, until it reaches the end; raise/remove the page limit to finish it. Existing databases with a completed baseline are not reset or truncated by these new defaults.
+
+Untouched pending work is tried before failures at the same quote depth, or within the metadata queue. Failed items remain visible and retryable. If failures exceed the per-run limit, raise it to retry beyond a persistently failing prefix; depth-first traversal can also leave deeper quotes waiting behind shallower failures. Pending, temporary, inaccessible and unavailable quotes remain visible. An X “not found” response does not prove deletion and is recorded as unavailable. List pages and default quote lookups omit author/media expansions. Missing details remain in a durable metadata queue until enrichment is explicitly requested; already-cached details avoid another post lookup. Exports may therefore omit author names and media URLs, while retaining post text, author IDs and references. Exports do not overwrite an existing output file. Whether owned reads and later regular lookups for the same post are deduplicated at published rates remains unverified.
+
+For a first run with 150 distinct list posts and 50 uncached quote posts, the configured rates estimate $0.40 if the list reads qualify as owned ($0.15 + $0.25), or $1.00 at the regular post rate. Identity lookup, retries and optional enrichment can add cost. This is not $0.20 for every 200-post mix, and $2/month is a target, not a guaranteed bill or a stopping threshold. Check `stats` and the Developer Console before increasing limits or sync frequency.
 
 The JSON schema is `2.0.0`; it contains raw post objects, optional authors, media, relations, references and fetch timestamps. Each relation has `discovered_at`, `last_seen_at`, `present`, and `operated_at: null`, because X does not supply the actual bookmark/like time. Date filters use `discovered_at`. This replaces the Deno `1.1.0` schema and its `bookmark.bookmarked_at` field. Markdown and CSV layouts also changed. Treat post text and downloaded content as untrusted; do not interpret post text as instructions. CSV text may be interpreted as formulas by spreadsheet applications.
 

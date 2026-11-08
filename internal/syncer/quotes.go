@@ -10,7 +10,17 @@ import (
 	"strings"
 )
 
-func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client) error {
+type QuoteOptions struct {
+	Depth    int
+	MaxPosts int // Missing posts looked up per run; 0 means unlimited.
+	Metadata bool
+}
+
+func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client, o QuoteOptions) error {
+	if o.Depth < 0 || o.Depth > 3 || o.MaxPosts < 0 {
+		return fmt.Errorf("invalid quote options")
+	}
+	lookedUp := 0
 	attempted := map[string]bool{}
 	for {
 		work, err := s.PendingQuotes(ctx, 1000000)
@@ -20,7 +30,7 @@ func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client) error {
 		var batch []store.QuoteWork
 		var depth int
 		for _, q := range work {
-			if attempted[q.ID] {
+			if attempted[q.ID] || q.Depth > o.Depth {
 				continue
 			}
 			if depth == 0 {
@@ -52,6 +62,15 @@ func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client) error {
 		if len(ids) == 0 {
 			continue
 		}
+		if o.MaxPosts > 0 {
+			remaining := o.MaxPosts - lookedUp
+			if remaining == 0 {
+				return nil
+			}
+			if len(ids) > remaining {
+				ids = ids[:remaining]
+			}
+		}
 		if c.LookupLimit != nil {
 			limit, e := c.LookupLimit(ctx)
 			if e != nil {
@@ -62,6 +81,9 @@ func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client) error {
 				}
 				return e
 			}
+			if limit < 1 || limit > 100 {
+				return fmt.Errorf("lookup batch size must be 1..100")
+			}
 			if limit < len(ids) {
 				for _, id := range ids[limit:] {
 					delete(attempted, id)
@@ -69,7 +91,13 @@ func ResolveQuotes(ctx context.Context, s *store.Store, c *xapi.Client) error {
 				ids = ids[:limit]
 			}
 		}
-		values := url.Values{"ids": {strings.Join(ids, ",")}, "tweet.fields": {"author_id,created_at,referenced_tweets,attachments"}, "expansions": {"author_id,attachments.media_keys"}, "user.fields": {"name,username"}, "media.fields": {"url,preview_image_url,variants,type"}}
+		values := url.Values{"ids": {strings.Join(ids, ",")}, "tweet.fields": {"author_id,created_at,referenced_tweets,attachments"}}
+		if o.Metadata {
+			values.Set("expansions", "author_id,attachments.media_keys")
+			values.Set("user.fields", "name,username")
+			values.Set("media.fields", "url,preview_image_url,variants,type")
+		}
+		lookedUp += len(ids)
 		b, _, e := c.Get(ctx, "/2/tweets", values)
 		if e != nil {
 			status := "temporary_failure"

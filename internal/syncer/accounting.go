@@ -36,18 +36,12 @@ func (a *Accountant) Attach(c *xapi.Client) {
 	c.LookupLimit = a.LookupLimit
 }
 func (a *Accountant) LookupLimit(ctx context.Context) (int, error) {
-	if a.Config.PostMicrousd <= 0 || a.Config.PostMicrousd > 1000000000 || a.Config.UserMicrousd <= 0 || a.Config.UserMicrousd > 1000000000 || a.Config.MediaMicrousd <= 0 || a.Config.MediaMicrousd > 1000000000 {
-		return 0, fmt.Errorf("quote prices are invalid")
-	}
 	if a.Config.LookupBatchSize < 1 || a.Config.LookupBatchSize > 100 {
 		return 0, fmt.Errorf("lookup batch size must be 1..100")
 	}
 	return a.Config.LookupBatchSize, nil
 }
 func (a *Accountant) Before(ctx context.Context, path string, q url.Values) error {
-	if a.Config.OwnedPostMicrousd <= 0 || a.Config.OwnedPostMicrousd > 1000000000 || a.Config.PostMicrousd <= 0 || a.Config.PostMicrousd > 1000000000 || a.Config.UserMicrousd <= 0 || a.Config.UserMicrousd > 1000000000 || a.Config.MediaMicrousd <= 0 || a.Config.MediaMicrousd > 1000000000 {
-		return fmt.Errorf("invalid resource prices")
-	}
 	var count int64
 	var e error
 	price := a.Config.PostMicrousd
@@ -65,12 +59,12 @@ func (a *Accountant) Before(ctx context.Context, path string, q url.Values) erro
 	default:
 		return fmt.Errorf("unrecognized endpoint for budget")
 	}
-	if e != nil || count < 1 || count > 100 || price <= 0 {
+	if e != nil || count < 1 || count > 100 || price <= 0 || price > 1000000000 {
 		return fmt.Errorf("missing or invalid price or result limit")
 	}
 	total := count * price
 	if q.Get("expansions") != "" {
-		if a.Config.UserMicrousd <= 0 || a.Config.MediaMicrousd <= 0 {
+		if a.Config.UserMicrousd <= 0 || a.Config.UserMicrousd > 1000000000 || a.Config.MediaMicrousd <= 0 || a.Config.MediaMicrousd > 1000000000 {
 			return fmt.Errorf("configure user and media prices before requesting expansions")
 		}
 		total += count * (a.Config.UserMicrousd + 4*a.Config.MediaMicrousd)

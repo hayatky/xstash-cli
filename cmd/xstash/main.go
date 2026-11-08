@@ -220,15 +220,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s *store.Store, c *config.Config, configPath, dbPath string) (err error) {
 	f := flags("sync", stderr)
 	kind := f.String("kind", "both", "bookmark, like, both")
-	full := f.Bool("full", false, "scan all pages")
+	full := f.Bool("full", false, "ignore known boundaries and initial limits; max-pages still applies")
 	size := f.Int("page-size", 5, "results per page")
-	threshold := f.Int("known-threshold", 5, "consecutive known relations")
-	maxNew := f.Int("max-new", 0, "new relations per kind, 0 for unlimited")
+	threshold := f.Int("known-threshold", 1, "consecutive known relations")
+	maxNew := f.Int("max-new", 0, "new relations per kind, 0 for unlimited; partial runs do not advance the baseline")
+	initialBookmarks := f.Int("initial-bookmarks", 100, "recent bookmarks in the first completed window, 0 for all")
+	initialLikes := f.Int("initial-likes", 50, "recent likes in the first completed window, 0 for all")
+	maxPages := f.Int("max-pages", 20, "pages per kind per run, 0 for unlimited; partial runs restart from the top")
+	quoteDepth := f.Int("quote-depth", 1, "quote levels to resolve, 0..3")
+	maxQuotes := f.Int("max-quote-lookups", 50, "missing quoted posts to look up per run, 0 for unlimited")
+	metadata := f.Bool("metadata", false, "fetch missing author and media details (extra API cost)")
+	maxMetadata := f.Int("max-metadata-lookups", 50, "posts to look up for metadata per run, 0 for unlimited")
 	downloadMedia := f.Bool("media", false, "download available media files")
 	if err = f.Parse(args); err != nil {
 		return err
 	}
-	if *threshold < 1 || *maxNew < 0 || *size < 1 || *size > 100 {
+	if *threshold < 1 || *maxNew < 0 || *size < 1 || *size > 100 || *initialBookmarks < 0 || *initialLikes < 0 || *maxPages < 0 || *quoteDepth < 0 || *quoteDepth > 3 || *maxQuotes < 0 || *maxMetadata < 0 {
 		return fmt.Errorf("invalid sync options")
 	}
 	kinds := []string{}
@@ -249,7 +256,8 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if err = auth.Ready(*c); err != nil {
 		return err
 	}
-	if c.MediaMicrousd <= 0 {
+	resolveMetadata := *metadata || *downloadMedia
+	if resolveMetadata && c.MediaMicrousd <= 0 {
 		return fmt.Errorf("media read price is unknown; set --media-microusd after checking Developer Console")
 	}
 	l, e := lock.Acquire(dbPath + ".lock")
@@ -316,7 +324,11 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 		if e = s.DB.QueryRowContext(ctx, `SELECT full FROM sync_resume WHERE kind=?`, k).Scan(&resumeFull); e != nil {
 			return e
 		}
-		r, e := syncer.RunKind(ctx, s, client, c.UserID, k, syncer.Options{Full: resumeFull != 0, PageSize: *size, Threshold: *threshold, MaxNew: *maxNew})
+		initialLimit := *initialBookmarks
+		if k == "like" {
+			initialLimit = *initialLikes
+		}
+		r, e := syncer.RunKind(ctx, s, client, c.UserID, k, syncer.Options{Full: resumeFull != 0, PageSize: *size, Threshold: *threshold, MaxNew: *maxNew, InitialLimit: initialLimit, MaxPages: *maxPages})
 		results = append(results, r)
 		if r.Complete && e == nil {
 			if _, dbErr := s.DB.ExecContext(ctx, `DELETE FROM sync_resume WHERE kind=?`, k); dbErr != nil {
@@ -342,14 +354,16 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if authFailure != nil {
 		return errors.Join(failures...)
 	}
-	if e = syncer.ResolveQuotes(ctx, s, client); e != nil {
+	if e = syncer.ResolveQuotes(ctx, s, client, syncer.QuoteOptions{Depth: *quoteDepth, MaxPosts: *maxQuotes, Metadata: resolveMetadata}); e != nil {
 		failures = append(failures, e)
 	}
 	if authFailure != nil {
 		return errors.Join(failures...)
 	}
-	if e = syncer.ResolveMetadata(ctx, s, client); e != nil {
-		failures = append(failures, e)
+	if resolveMetadata {
+		if e = syncer.ResolveMetadata(ctx, s, client, *maxMetadata); e != nil {
+			failures = append(failures, e)
+		}
 	}
 	if authFailure != nil {
 		return errors.Join(failures...)
@@ -387,6 +401,13 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 	if e != nil {
 		return e
 	}
+	var activeQuotes, deferredQuotes int
+	if e = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM quote_queue WHERE status!='resolved' AND depth<=?`, *quoteDepth).Scan(&activeQuotes); e != nil {
+		return e
+	}
+	if e = s.DB.QueryRowContext(ctx, `SELECT count(*) FROM quote_queue WHERE status!='resolved' AND depth>?`, *quoteDepth).Scan(&deferredQuotes); e != nil {
+		return e
+	}
 	if len(failures) == 0 {
 		status = "completed"
 		for _, result := range results {
@@ -395,16 +416,14 @@ func syncCommand(ctx context.Context, args []string, stdout, stderr io.Writer, s
 				break
 			}
 		}
-		for k, n := range quotes {
-			if k != "resolved" && n > 0 {
-				status = "partial"
-			}
+		if activeQuotes > 0 {
+			status = "partial"
 		}
-		if pendingMetadata > 0 {
+		if resolveMetadata && pendingMetadata > 0 {
 			status = "partial"
 		}
 	}
-	if e = jsonOut(stdout, map[string]any{"run_id": id, "status": status, "results": results, "quotes": quotes, "quote_reasons": reasons, "pending_metadata": pendingMetadata, "metadata_reasons": metadataReasons, "requests": requestCount, "retrieved_resources": resourceCount, "estimated_microusd": estimated, "uncertain_reserved_microusd": uncertain, "currency": "USD", "current_month": month}); e != nil {
+	if e = jsonOut(stdout, map[string]any{"run_id": id, "status": status, "results": results, "policy": map[string]any{"full_requested": *full, "max_new_per_kind": *maxNew, "initial_bookmarks": *initialBookmarks, "initial_likes": *initialLikes, "page_size": *size, "known_threshold": *threshold, "max_pages_per_kind": *maxPages, "quote_depth": *quoteDepth, "max_quote_lookups": *maxQuotes, "metadata_requested": resolveMetadata, "max_metadata_lookups": *maxMetadata, "monthly_spend_cap": false}, "deferred_quotes": deferredQuotes, "quotes": quotes, "quote_reasons": reasons, "pending_metadata": pendingMetadata, "metadata_reasons": metadataReasons, "requests": requestCount, "retrieved_resources": resourceCount, "estimated_microusd": estimated, "uncertain_reserved_microusd": uncertain, "currency": "USD", "current_month": month}); e != nil {
 		return e
 	}
 	if len(failures) > 0 {
