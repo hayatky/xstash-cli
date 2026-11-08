@@ -1,4 +1,4 @@
 interface:
   display_name: "Xstash Bookmark Intel"
-  short_description: "Sync X bookmarks and derive recent interests"
-  default_prompt: "Use $xstash-bookmark-intel to update my X bookmarks, summarize recent interests, and propose concrete next actions."
+  short_description: "Analyze synced bookmarks and likes"
+  default_prompt: "Use $xstash-bookmark-intel to analyze my synced X bookmarks and likes, summarize interests, and propose concrete follow-up work."

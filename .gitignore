@@ -137,3 +137,11 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# xstash local data and credentials
+/xstash
+/xstash.exe
+xstash-go.sqlite*
+.xstash-go/
+.xstash/
+config.json

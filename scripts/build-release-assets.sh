@@ -89,10 +89,10 @@ fi
 mkdir -p "$OUT_DIR"
 
 TARGETS=(
-  "linux-x64:x86_64-unknown-linux-gnu:"
-  "macos-x64:x86_64-apple-darwin:"
-  "macos-arm64:aarch64-apple-darwin:"
-  "windows-x64:x86_64-pc-windows-msvc:.exe"
+  "linux-x64:linux-amd64:"
+  "macos-x64:darwin-amd64:"
+  "macos-arm64:darwin-arm64:"
+  "windows-x64:windows-amd64:.exe"
 )
 
 TMP_DIR="$(mktemp -d)"

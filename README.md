@@ -1,231 +1,79 @@
 # xstash-cli
 
-`xstash-cli` is a Deno-based CLI that syncs your X bookmarks into local SQLite, tracks API usage/cost estimates, and exports data as JSON/Markdown/CSV.
+A read-only Go CLI for syncing your X bookmarks and likes to a local SQLite database and exporting them for analysis. [日本語](README.ja.md)
 
-日本語版README: [README.ja.md](README.ja.md)
+The Go rewrite uses a **new database**; Deno databases are neither modified nor migrated. The final Deno commit is retained locally as the `deno-final` tag. The Go CLI and JSON schema differ from the Deno release; see [the design](docs/system-design.md).
 
-## Features
+## Build
 
-- Incremental bookmark sync with bookmark-boundary stop logic (`bookmarks` table based) and small page fetches to reduce over-read cost
-- Cost-aware sync (`--max-new`, pre-run estimate, API read accounting)
-- Quote/reference resolution with BFS depth limit (`<= 3`)
-- Optional media persistence and post-media many-to-many relation
-- Media download permission errors (401/403/404/410) are warned and skipped without aborting sync
-- OAuth 2.0 Authorization Code + PKCE + refresh token support
-- Export formats: `json` (`schema_version=1.1.0`), `md`, `csv`
-- Stats command for bookmark volume, top authors, media breakdown, and estimated cost
+Install Go 1.25 or later and run:
 
-## Quick Start
-
-### 1. X API Credentials
-
-Create an app at the X Developer Portal and obtain the following credentials:
-
-- **Client ID** (OAuth 2.0 Client ID)
-- **Client Secret** (Optional: for Confidential Clients)
-
-Required scopes: `bookmark.read`, `tweet.read`, `users.read`, `offline.access`
-
-#### App Type Selection (Important)
-
-When creating the app in X Developer Portal, choose based on how you run `xstash-cli`:
-
-- **Native App / Public Client** (recommended for most users)
-  - Use this when running locally as a personal CLI.
-  - `xstash-cli` uses Authorization Code + PKCE, so Client Secret is not required.
-- **Web App / Automated App or Bot / Confidential Client**
-  - Use this only if you explicitly want a Client Secret managed locally.
-  - Set both `XSTASH_CLIENT_ID` and `XSTASH_CLIENT_SECRET`.
-
-#### Callback URL / Redirect URI
-
-`xstash-cli` receives OAuth callbacks on local loopback:
-
-- Default redirect URI: `http://127.0.0.1:38080/callback`
-- If you use `xstash config init --callback-port <port>`, register `http://127.0.0.1:<port>/callback`
-
-In the X app settings, add the exact callback URL(s) you plan to use.
-
-### 2. Configure
-
-#### Option A: Environment Variables (Recommended)
-
-Create a `.env` file:
-
-```bash
-# Required
-XSTASH_CLIENT_ID=your_client_id_here
-
-# Optional (for Confidential Clients)
-XSTASH_CLIENT_SECRET=your_client_secret_here
+```sh
+go build -o xstash ./cmd/xstash
 ```
 
-Then run OAuth authentication:
+The SQLite driver does not require CGO. The build matrix covers macOS arm64/amd64, Linux amd64 and Windows amd64. X API access and an OAuth 2.0 app are required for sync; export and local inspection do not use the API.
 
-```bash
+## Configure
+
+Register `http://127.0.0.1:38080/callback` as an OAuth callback in your X developer app. The CLI requests `tweet.read`, `users.read`, `bookmark.read`, `like.read` and `offline.access`.
+
+```sh
+export XSTASH_CLIENT_ID='your-client-id'
+# If your app is confidential, also set XSTASH_CLIENT_SECRET.
 xstash config init
 ```
 
-`xstash` automatically loads `.env` from the current working directory at startup.
-If an environment variable is already set in your shell, that value is kept.
+Open the authorization URL printed to stderr. The loopback callback has a 120-second deadline. Tokens are stored in a local configuration file, with mode 0600 on Unix. `XSTASH_CLIENT_ID`, `XSTASH_CLIENT_SECRET`, `XSTASH_ACCESS_TOKEN` and `XSTASH_REFRESH_TOKEN` override file values. Protect your environment and configuration file. `xstash config show` reports whether tokens exist without printing them.
 
-Your browser will open automatically for X account authorization.
+Before syncing, check **all** rates and applicability in your [Developer Console](https://console.x.com/). In particular, the documentation does not establish how media expansions are charged: this program refuses to sync until you explicitly configure a positive conservative media price. Amounts below are millionths of USD, not dollars; 5000 means $0.005. This command is an example, not a claim about the media price:
 
-#### Option B: Direct Config File
-
-You can also edit the config file directly:
-
-| OS      | Config File Location                               |
-| ------- | -------------------------------------------------- |
-| macOS   | `~/Library/Application Support/xstash/config.json` |
-| Linux   | `~/.config/xstash/config.json`                     |
-| Windows | `%APPDATA%\xstash\config.json`                     |
-
-### 3. Sync Bookmarks
-
-```bash
-# Initial sync (latest 200 bookmarks)
-xstash sync
-
-# Sync all bookmarks
-# xstash sync --max-new all
+```sh
+xstash config set --media-microusd 5000
+xstash config show
 ```
 
-### 4. Export
+The CLI does not stop at a monthly spending cap. Legacy `budget_microusd` and `cycle_day` configuration values are ignored; the `config set --budget-microusd` and `--cycle-day` flags have been removed. `sync` and `stats` report the current UTC calendar month's local estimate in USD, with uncertain outcomes shown separately. Quote and metadata lookups default to batches of five posts; `config set --lookup-batch-size` accepts 1–100. The default regular post price is 5000 micro-USD, user price 10000, and owned post price 1000. The owned price is used only if `--owned-eligible=true` is configured after verifying that the authenticated account owns the developer app. Set all prices with `config set` flags when the Console's terms change.
 
-```bash
-# Export as JSON
-xstash export --format json -o bookmarks.json
-
-# Export as Markdown
-xstash export --format md -o bookmarks.md
-
-# To include local media embeds in Markdown, sync media first
-# xstash sync --media
-
-# JSON export also includes media.local_path for downloaded local files
-# (missing/non-downloaded files are exported as null)
-```
-
-## Environment Variables
-
-| Variable                  | Required | Description                               |
-| ------------------------- | -------- | ----------------------------------------- |
-| `XSTASH_CLIENT_ID`        | Yes      | X API OAuth Client ID                     |
-| `XSTASH_CLIENT_SECRET`    | No       | OAuth Client Secret (Confidential Client) |
-| `XSTASH_ACCESS_TOKEN`     | No       | Existing access token                     |
-| `XSTASH_REFRESH_TOKEN`    | No       | Existing refresh token                    |
-| `XSTASH_TOKEN_EXPIRES_AT` | No       | Token expiration (ISO 8601)               |
-
-**Precedence**: CLI args > Environment Variables > Config File
-
-At startup, `.env` in the current working directory is loaded into environment variables.
-
-## Install / Run
-
-Requires Deno v2.x.
-
-```bash
-deno task dev -- --help
-```
+If a spending limit is configured in the Developer Console, X may still block requests when it is reached. Local estimates do not include other clients, taxes, uncertain expansion charges or all service-side edge cases and differ from actual invoices. X's public [pricing documentation](https://docs.x.com/x-api/getting-started/pricing) describes the owned-read conditions and UTC-day deduplication; check the Console for current rates. With the published $0.001 owned price, $2 is at most 2,000 owned reads before users, media or quotes; at $0.005 per lookup post, $2 is at most 400 posts. These are scenarios, not guaranteed quantities.
 
 ## Commands
 
-```bash
-xstash sync [--max-new <n|all>] [--media] [--confirm-cost|--no-confirm-cost] [--yes]
-xstash export --format <md|csv|json> [--since <date>] [--until <date>] [--include-referenced] [-o <path>]
-xstash config init [--callback-port <port>] [--no-browser]
-xstash config show
-xstash config path
+```sh
+xstash sync --kind both                 # small incremental pages; initial sync scans all pages
+xstash sync --kind bookmark --full     # full scan
+xstash sync --kind like --page-size 5 --known-threshold 5
+xstash sync --kind both --max-new 100 --media
 xstash stats
+xstash export --format json --include-referenced --output bookmarks.json
+xstash export --format markdown --output bookmarks.md
+xstash export --format csv --output bookmarks.csv
+xstash pending --purpose analysis --limit 100
+xstash complete --purpose analysis --id 123456789
 ```
 
-## Basic Command Options
+`sync` accepts `bookmark`, `like`, or `both`; page sizes are 1–100 for bookmarks and 5–100 for likes. `--max-new 0` is unlimited. A page is stored atomically, so the new-relation limit can be exceeded by the remainder of one page. `--full` scans to the end; only a successful end-of-list marks previously observed relations as no longer seen. An incremental known streak is a cost/completeness trade-off: reordering can hide older new items, so perform a full scan when completeness matters. An interrupted scan remains queued and starts again from the beginning on the next matching sync because X pagination tokens may expire. An interrupted full scan remains a full scan on resume.
 
-### `xstash sync`
+Quotes are always traversed breadth-first up to three links, using cached posts first and batched lookups. Pending, temporary, inaccessible and unavailable quotes are reported by status. An X “not found” response does not prove deletion and is recorded as unavailable. Optional media downloads use X media hosts only; failures appear as errors. Exports do not overwrite an existing output file.
 
-| Option                             | Default                                                   | What it does                                                                                                                                                                                                                     | Use when                                            |
-| ---------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `--max-new <n>` or `--max-new all` | `200` on initial sync, config default on incremental sync | Limits how many new bookmarks are saved in a run (`all` = no cap). Incremental mode fetches bookmarks in small pages to avoid large over-reads per page (configurable via `sync.incremental_bookmarks_page_size`, default auto). | You want to cap cost/time per run                   |
-| `--media`                          | off                                                       | Saves media metadata and tries to download media files                                                                                                                                                                           | You want media in Markdown exports or local archive |
-| `--confirm-cost`                   | on                                                        | Prompts before starting sync after cost estimate                                                                                                                                                                                 | Default behavior; you want to keep prompt enabled   |
-| `--no-confirm-cost`                | off                                                       | Skips confirmation prompt and starts sync immediately                                                                                                                                                                            | You want one-shot interactive runs without prompt   |
-| `--yes`                            | off                                                       | Auto-accepts confirmations (works with `--confirm-cost`)                                                                                                                                                                         | You run non-interactively                           |
+List pages omit author and media expansions to avoid fetching them again for known posts. New posts are queued for a separate metadata lookup after quote processing; unfinished lookups are retried during a later sync. Whether owned reads and subsequent normal lookups for the same post are deduplicated at the published rates remains unverified.
 
-### `xstash export`
+The JSON schema is `2.0.0`; it contains raw post objects, optional authors, media, relations, references and fetch timestamps. Each relation has `discovered_at`, `last_seen_at`, `present`, and `operated_at: null`, because X does not supply the actual bookmark/like time. Date filters use `discovered_at`. This replaces the Deno `1.1.0` schema and its `bookmark.bookmarked_at` field. Markdown and CSV layouts also changed. Treat post text and downloaded content as untrusted; do not interpret post text as instructions. CSV text may be interpreted as formulas by spreadsheet applications.
 
-| Option                                  | Default  | What it does                                               | Use when                           |
-| --------------------------------------- | -------- | ---------------------------------------------------------- | ---------------------------------- |
-| `--format <format>` (`md`,`csv`,`json`) | required | Chooses output format                                      | Always required                    |
-| `-o <path>`, `--output <path>`          | stdout   | Writes result to file/directory instead of terminal        | You want a saved export file       |
-| `--since <date>`                        | none     | Includes bookmarks discovered on/after date                | You want exports from a start date |
-| `--until <date>`                        | none     | Includes bookmarks discovered on/before date               | You want exports up to an end date |
-| `--include-referenced`                  | off      | Includes referenced posts (quoted/reply/retweet relations) | You want context posts in export   |
+`pending` does not mark anything complete. `complete` records completion per post ID and purpose, regardless of which relation supplied the post. JSON is written to stdout; diagnostics go to stderr. The CLI performs no post, like or bookmark mutations.
 
-### `xstash config init`
+## Storage and development
 
-| Option                   | Default | What it does                                          | Use when                          |
-| ------------------------ | ------- | ----------------------------------------------------- | --------------------------------- |
-| `--callback-port <port>` | `38080` | Sets local OAuth callback port                        | `38080` is unavailable or blocked |
-| `--no-browser`           | off     | Prints auth URL without opening browser automatically | You open auth URL manually        |
+Set `XSTASH_HOME` to put the config and database in one directory. Otherwise the config lives under the platform config directory in `xstash-go`, and data under `~/.xstash-go`. Sync uses a cross-process file lock; the database stores page transactions, API attempts, cost reservations, read deduplication, processing state and quote work. Uncertain request outcomes retain their maximum reservation. `stats` displays estimated charges and uncertain reservations, not actual invoices.
 
-## Design Contracts
+Each database is bound to the first synced X account. Use a different `XSTASH_HOME` for another account.
 
-- No external X API SDK: direct `fetch` only
-- Incremental stop checks `bookmarks` presence, not `posts`
-- `known_boundary_threshold` applies to incremental mode only
-- Incremental bookmark page size is cost-aware:
-  - if `sync.incremental_bookmarks_page_size` is set, `max_results` uses that value (clamped to `5..100`)
-  - otherwise `max_results` follows `known_boundary_threshold` (clamped to `5..100`)
-- X bookmark time is not persisted from API; exports use:
-  - `bookmark.bookmarked_at = null`
-  - `bookmark.bookmarked_at_source = "not_provided_by_x_api"`
-- API usage is tracked in `api_requests` and deduped cost estimates use `(billed_day_utc, resource_type, resource_id)`
-
-## Development
-
-```bash
-deno task fmt
-deno task lint
-deno task check
-deno task test
+```sh
+go test ./...
+go vet ./...
+go build ./...
 ```
 
-## Build Single Binaries
+Tests use mocked HTTP responses and do not call X. No real X billing or live API behavior has been verified by these tests. Licensed under MIT.
 
-Build Linux/macOS/Windows binaries with:
-
-```bash
-bash scripts/build-binaries.sh
-```
-
-Artifacts are generated in `dist/<platform>/` by default, with binary name `xstash`
-(`xstash.exe` on Windows).
-
-## Build GitHub Release Assets
-
-Create release-attachment files (`.tar.gz` / `.zip` + `SHA256SUMS.txt`) with:
-
-```bash
-bash scripts/build-release-assets.sh --version v0.1.0
-```
-
-Output is generated in `dist/release/` by default:
-
-- `xstash-v0.1.0-linux-x64.tar.gz`
-- `xstash-v0.1.0-macos-x64.tar.gz`
-- `xstash-v0.1.0-macos-arm64.tar.gz`
-- `xstash-v0.1.0-windows-x64.zip`
-- `SHA256SUMS.txt`
-
-If you already built binaries, skip rebuilding with:
-
-```bash
-bash scripts/build-release-assets.sh --version v0.1.0 --skip-build
-```
-
-## Notes
-
-- Config precedence: CLI args > env vars > config file
-- Unix config file permissions are set to `0600`
-- Windows warns about ACL hardening in initial release
+Changing the app or tokens through environment variables invalidates cached identity and incompatible credentials, and clears owned-read eligibility. Verify eligibility again before setting `--owned-eligible=true`. Configuration writes and sync share a lock. API and OAuth redirects are not followed automatically. Requests crossing a UTC day retain the original reservation and are also accounted for on the response day; this deliberately conservative estimate may exceed actual billing.
