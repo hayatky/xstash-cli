@@ -2,9 +2,35 @@
 
 A read-only Go CLI for syncing your X bookmarks and likes to a local SQLite database and exporting them for analysis. [日本語](README.ja.md)
 
-The Go rewrite uses a **new database**; Deno databases are neither modified nor migrated. The final Deno commit is retained locally as the `deno-final` tag. The Go CLI and JSON schema differ from the Deno release; see [the design](docs/system-design.md).
+**v2.0.0 is a breaking Go rewrite.** It uses a new database and does not migrate or modify Deno archives. Read the [upgrade guide](docs/migration-v2.md), [release notes](docs/releases/v2.0.0.md) and [changelog](CHANGELOG.md) before replacing v1 automation.
 
-## Build
+## Install a release
+
+Download your archive and `SHA256SUMS.txt` from [GitHub Releases](https://github.com/hayatky/xstash-cli/releases):
+
+- Linux x86-64: `xstash-v2.0.0-linux-x64.tar.gz`
+- macOS Intel: `xstash-v2.0.0-macos-x64.tar.gz`
+- macOS Apple silicon: `xstash-v2.0.0-macos-arm64.tar.gz`
+- Windows x86-64: `xstash-v2.0.0-windows-x64.zip`
+
+Verify the archive **before extracting or running it**. For example, in the download directory on Linux:
+
+```sh
+grep '  xstash-v2.0.0-linux-x64.tar.gz$' SHA256SUMS.txt | sha256sum -c -
+tar -xzf xstash-v2.0.0-linux-x64.tar.gz
+./xstash-v2.0.0-linux-x64/xstash --version
+```
+
+On macOS, substitute your archive name and use `shasum -a 256 -c -` instead of `sha256sum -c -`. Continue only when the check reports `OK`. On Windows PowerShell:
+
+```powershell
+Get-FileHash .\xstash-v2.0.0-windows-x64.zip -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+Compare the hash with the exact Windows archive entry; stop if it differs. Then extract with `Expand-Archive .\xstash-v2.0.0-windows-x64.zip` and run the extracted `xstash.exe --version`. Place the binary in a directory on your `PATH`, or continue using its full path. Checksums detect corruption but are not an independent publisher signature. Release archives include the license, READMEs, changelog, migration guide and agent skill.
+
+## Build from source
 
 Install Go 1.25 or later and run:
 

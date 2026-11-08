@@ -39,8 +39,18 @@ func flags(name string, errout io.Writer) *flag.FlagSet {
 	return f
 }
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 1 {
+		switch args[0] {
+		case "version", "--version", "-v":
+			_, err := fmt.Fprintf(stdout, "xstash %s (%s)\n", version, commit)
+			return err
+		case "help", "--help", "-h":
+			_, err := io.WriteString(stdout, usage)
+			return err
+		}
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: xstash <config|db|sync|export|stats|pending|complete>")
+		return fmt.Errorf("usage: xstash <config|db|sync|export|stats|pending|complete|version>; use --help")
 	}
 	configPath, dbPath, err := config.Paths()
 	if err != nil {

@@ -4,12 +4,43 @@ Xのブックマークといいねを、SQLiteに保存するGo製の読み取�
 JSON、Markdown、CSVへエクスポートできます。
 [English](README.md)
 
-Go版は別のデータベースを使用し、Deno版のDBを変更または移行しません。
-Deno版の最終コミットはローカルの `deno-final` タグに残しています。
-CLIとJSONの形式はDeno版から変更しています。
-詳細は[設計書](docs/system-design.md)を参照してください。
+**v2.0.0は、互換性のない変更を含むGo版への書き換えです。**
+新しいDBを使用し、Deno版のDBを変更・移行しません。
+v1の自動処理を置き換える前に、[移行ガイド](docs/migration-v2.md)、[リリースノート](docs/releases/v2.0.0.md)、[変更履歴](CHANGELOG.md)を確認してください。
 
-## ビルド
+## リリース版のインストール
+
+[GitHub Releases](https://github.com/hayatky/xstash-cli/releases)から、使用するOSのアーカイブと `SHA256SUMS.txt` をダウンロードします。
+
+- Linux x86-64: `xstash-v2.0.0-linux-x64.tar.gz`
+- macOS Intel: `xstash-v2.0.0-macos-x64.tar.gz`
+- macOS Apple silicon: `xstash-v2.0.0-macos-arm64.tar.gz`
+- Windows x86-64: `xstash-v2.0.0-windows-x64.zip`
+
+**展開・実行前にチェックサムを確認してください。** Linuxでは、ダウンロード先で次のように実行します。
+
+```sh
+grep '  xstash-v2.0.0-linux-x64.tar.gz$' SHA256SUMS.txt | sha256sum -c -
+tar -xzf xstash-v2.0.0-linux-x64.tar.gz
+./xstash-v2.0.0-linux-x64/xstash --version
+```
+
+macOSではアーカイブ名を使用する機種のものに変え、`sha256sum -c -` の代わりに `shasum -a 256 -c -` を使います。
+`OK` と表示された場合だけ、展開して実行してください。
+WindowsのPowerShellでは、次の結果を照合します。
+
+```powershell
+Get-FileHash .\xstash-v2.0.0-windows-x64.zip -Algorithm SHA256
+Get-Content .\SHA256SUMS.txt
+```
+
+Windows用アーカイブの行とハッシュが一致することを確認し、異なる場合は実行しません。
+`Expand-Archive .\xstash-v2.0.0-windows-x64.zip` で展開し、展開先の `xstash.exe --version` を実行します。
+バイナリを `PATH` の通ったディレクトリに置くか、実行時にフルパスを指定してください。
+チェックサムは破損の検出用であり、配布者の署名ではありません。
+アーカイブにはライセンス、README、変更履歴、移行ガイド、エージェント用スキルを同梱します。
+
+## ソースからビルド
 
 Go 1.25以降を使用します。
 SQLiteドライバーにCGOは不要です。

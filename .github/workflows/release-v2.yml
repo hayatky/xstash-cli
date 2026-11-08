@@ -1,0 +1,95 @@
+name: Release v2.0.0
+
+# Deliberately separate from master pushes. Create this branch at the verified
+# master commit only when publication is authorized and master CI has passed.
+on:
+  push:
+    branches: [release/v2.0.0]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-v2.0.0
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'hayatky/xstash-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require exact master commit and unused version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-v2-release.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./...
+      - run: go vet ./...
+      - run: go build ./...
+      - run: bash scripts/test-release-assets.sh
+      - run: bash scripts/test-check-v2-release.sh
+      - run: bash scripts/build-release-assets.sh --version v2.0.0
+      - name: Verify packaged Linux binary and checksums
+        run: |
+          (cd dist/release && sha256sum --check SHA256SUMS.txt)
+          mkdir -p dist/smoke
+          tar -xzf dist/release/xstash-v2.0.0-linux-x64.tar.gz -C dist/smoke
+          test "$(dist/smoke/xstash-v2.0.0-linux-x64/xstash --version)" = "xstash 2.0.0 ($GITHUB_SHA)"
+          dist/smoke/xstash-v2.0.0-linux-x64/xstash --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xstash-v2.0.0-release
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: xstash-v2.0.0-release
+          path: dist/release
+      - name: Recheck release target and archive integrity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/check-v2-release.sh
+          (cd dist/release && sha256sum --check SHA256SUMS.txt)
+          test "$(find dist/release -maxdepth 1 -type f | wc -l)" -eq 5
+      - name: Create draft with assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Creating the ref is atomic and fails if another actor created it
+          # after preflight. Never adopt or replace an existing tag.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref=refs/tags/v2.0.0 -f sha="$GITHUB_SHA"
+          gh release create v2.0.0 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --verify-tag \
+            --title 'v2.0.0' \
+            --notes-file docs/releases/v2.0.0.md \
+            --draft \
+            dist/release/SHA256SUMS.txt \
+            dist/release/xstash-v2.0.0-linux-x64.tar.gz \
+            dist/release/xstash-v2.0.0-macos-x64.tar.gz \
+            dist/release/xstash-v2.0.0-macos-arm64.tar.gz \
+            dist/release/xstash-v2.0.0-windows-x64.zip
+          test "$(gh release view v2.0.0 --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')" -eq 5
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq '.object.sha')" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v2.0.0" --jq '.object.sha')" = "$GITHUB_SHA"
+          gh release edit v2.0.0 --repo "$GITHUB_REPOSITORY" --draft=false --latest
