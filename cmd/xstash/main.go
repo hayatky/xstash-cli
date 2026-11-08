@@ -67,11 +67,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	args = args[1:]
 	if cmd == "config" {
 		if len(args) == 0 {
-			return fmt.Errorf("usage: config <init|set|show>")
+			return fmt.Errorf("usage: config <init|import|set|show>")
 		}
 		switch args[0] {
 		case "show":
 			return jsonOut(stdout, map[string]any{"client_id": c.ClientID, "user_id": c.UserID, "access_token_set": c.AccessToken != "", "refresh_token_set": c.RefreshToken != "", "expires_at": c.ExpiresAt, "token_type": c.TokenType, "scope": c.Scope, "scope_source": c.ScopeSource, "refresh_state": c.RefreshState, "refresh_started_at": c.RefreshStartedAt, "auth_metadata_valid": auth.Ready(c) == nil, "lookup_batch_size": c.LookupBatchSize, "owned_post_microusd": c.OwnedPostMicrousd, "post_microusd": c.PostMicrousd, "user_microusd": c.UserMicrousd, "media_microusd": c.MediaMicrousd, "owned_eligible": c.OwnedEligible})
+		case "import":
+			return importCommand(ctx, args[1:], stdout, stderr, &c, configPath)
 		case "init":
 			f := flags("config init", stderr)
 			id := f.String("client-id", c.ClientID, "OAuth client ID")
